@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Run DJ</title>
+<style>
+:root{--bg:#fafaf7;--fg:#1c1c1a;--mut:#6b6b66;--card:#fff;--bd:#e2e2dc;--acc:#e8590c;--ok:#2b8a3e;--q:#b7791f;--track:#ecebe5;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#f0efe9;--mut:#9a9a92;--card:#201f1d;--bd:#33322e;--acc:#ff8a4c;--ok:#69db7c;--q:#ffd166;--track:#2c2b28}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,sans-serif}
+main{max-width:820px;margin:0 auto;padding:16px;display:grid;gap:14px}
+h1{font-size:20px;margin:4px 0 0}.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px}
+.lbl{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.big{font-size:40px;font-weight:700;color:var(--acc);line-height:1;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--acc)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:space-between}
+button,input[type=number]{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:7px 12px}
+button{cursor:pointer}button.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button.s{padding:1px 7px;font-size:12px}
+.set input[type=number]{width:100%}.en{width:58px;padding:2px 4px;font-size:12px}
+.np{font-size:18px;font-weight:600;margin:6px 0 2px}
+.bar{position:relative;height:10px;background:var(--track);border-radius:6px;margin:12px 0 6px}
+.fill{height:100%;background:var(--acc);border-radius:6px;width:0}
+.mk{position:absolute;top:-4px;width:2px;height:18px;background:var(--mut)}.mk.b{background:var(--q);width:3px}
+canvas#wave{width:100%;height:90px;display:block;margin-top:10px}
+.small{font-size:12px;color:var(--mut)}.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;border:1px solid var(--bd)}
+.q{color:var(--q);border-color:var(--q)}.ok{color:var(--ok);border-color:var(--ok)}
+ul{list-style:none;margin:0;padding:0;max-height:360px;overflow-y:auto}
+li{display:flex;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:8px;opacity:.4;align-items:center}
+li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
+#log{max-height:200px;overflow:auto;font-size:13px}#log div{padding:3px 0;border-bottom:1px solid var(--bd);white-space:nowrap}
+.set{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px}.set label{display:grid;gap:3px;font-size:12px;color:var(--mut)}
+.set label.ck{grid-template-columns:auto 1fr;align-items:center;align-self:end}
+.seg button{flex:1}button:disabled,input:disabled{opacity:.5}
+</style></head><body><main>
+<div><h1>🏃 Run DJ</h1><div class="small" id="count"></div></div>
+<section class="card">
+  <div class="lbl">Cadence source</div>
+  <div class="row seg"><button id="src_manual" class="p">Manual</button><button id="src_hc">Health Connect</button></div>
+  <div class="row" style="margin-top:10px"><span class="big" id="bpmv">150</span><span class="small" id="cadsub">steps / BPM · manual</span></div>
+  <input type="range" id="bpm" min="60" max="190" value="150">
+  <div id="hcbox" style="display:none;margin-top:8px">
+    <div class="row" style="justify-content:flex-start"><button id="hcconnect">Connect</button><button id="hctest">Test read</button></div>
+    <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
+  </div>
+  <div style="margin-top:10px"><button class="p" id="go">▶ Start</button></div>
+</section>
+<section class="card"><div class="lbl">Library</div>
+  <div class="small" id="libstatus" style="margin:4px 0">Loading…</div>
+  <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button><button id="clearlib">Clear</button></div>
+  <input type="file" id="file" multiple accept=".json,application/json,audio/*" style="display:none">
+  <div class="small" id="impmsg" style="margin-top:6px"></div></section>
+<section class="card">
+  <div class="lbl">Now playing</div><div class="np" id="np">Press Start</div><div class="small" id="sub"></div>
+  <div class="bar"><div class="fill" id="fill"></div><div class="mk" id="mkmin"></div><div class="mk b" id="mkb" style="display:none"></div></div>
+  <div class="row"><span class="small" id="el"></span><span class="small">grey = min play time · amber = swap point</span></div>
+  <div id="pend" style="margin-top:8px"></div>
+  <canvas id="wave" width="800" height="90"></canvas>
+  <div class="small">waveform · green ticks = good exit points · grey = min play · amber = fade, which ends on the exit point</div>
+</section>
+<section class="card"><div class="lbl">Settings</div><div class="set">
+  <label>Tolerance ± BPM<input type="number" id="tol" value="6"></label>
+  <label>Min play (s)<input type="number" id="min" value="30"></label>
+  <label>Switch margin<input type="number" id="mar" value="3"></label>
+  <label>Shuffle range (cost)<input type="number" id="spread" value="4"></label>
+  <label>Crossfade (s)<input type="number" id="xf" value="4"></label>
+  <label>Swap timing<select id="swap"><option value="section">Section-aware</option><option value="bar">Phrase bars (beat-aligned)</option></select></label>
+  <label>Max wait for good exit (s)<input type="number" id="wait" value="20"></label>
+  <label>Step window (s)<input type="number" id="hcwin" value="120"></label>
+  <label>Treat data as stopped after (s)<input type="number" id="hcstale" value="240"></label>
+  <label>Health Connect poll (s)<input type="number" id="hcpoll" value="10"></label>
+  <label>Energy weight (BPM)<input type="number" id="ew" value="3" step="0.5"></label>
+  <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
+  <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
+  <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
+  <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
+  <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
+<section class="card"><div class="lbl">Your songs · bright = fits current cadence · ⚡ = energy 0–1 (editable) · ½ / ×2 fix a wrong BPM</div><ul id="list"></ul></section>
+<section class="card"><div class="lbl">Event log</div><div id="log"></div></section>
+</main>
+<script src="bridge.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const SILENT='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+const AU=[new Audio(),new Audio()];
+let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,recent=[];
+const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,xf:+$('xf').value,
+  ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
+const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
+const logOnce=(k,m)=>{if(k!==lastKey){lastKey=k;log(m)}};
+const name=s=>s.artist?`${s.title} — ${s.artist}`:s.title;
+
+// How can this song fit cadence c? Tries 1:1 first; half-time (runner takes 2 steps per beat) costs a penalty.
+// cost = distance + penalties - energy bonus. null if nothing is within tolerance.
+function match(s,c){
+  const st=S();let r=null;
+  const cands=[{b:s.bpm,pen:0,alt:false}];
+  if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)cands.push({b:a.bpm,pen:1,alt:true});
+  const modes=[[1,0,'1:1']];if(st.half)modes.push([2,st.htpen,'half-time']);
+  for(const k of cands)for(const [mult,pen,mode] of modes){
+    const diff=Math.abs(k.b*mult-c);
+    if(diff<=st.tol){const cost=diff+k.pen+pen-st.ew*s.energy;
+      if(!r||cost<r.cost)r={cost,diff,tempo:k.b,mode:mode+(k.alt?', alt tempo':'')}}
+  }
+  return r;
+}
+const bestMatch=c=>{let r=null;for(const s of songs){const m=match(s,c);if(m&&(!r||m.cost<r.m.cost))r={s,m}}return r};
+const desc=m=>`${m.mode}, off by ${m.diff.toFixed(0)}`;
+
+const eff=m=>m.tempo*(m.mode.startsWith('half')?2:1);          // effective steps/min this match is for
+const gain=f=>[Math.sin(f*Math.PI/2),Math.cos(f*Math.PI/2)];    // [incoming, outgoing]: equal-power fade
+const lv=b=>b[3]==null?0.5:b[3];                                // bar = [time, exitScore, phraseStart, energy 0..1]
+const barAt=(s,t)=>{let r=s.bars[0];for(const b of s.bars){if(b[0]<=t)r=b;else break}return r};
+function highRuns(s){   // stretches of ≥3 bars with energy ≥0.75: the choruses / drops
+  if(s._hr)return s._hr;const runs=[];let st=null;
+  s.bars.forEach((b,i)=>{if(lv(b)>=.75){if(st===null)st=i}else if(st!==null){runs.push([st,i]);st=null}});
+  if(st!==null)runs.push([st,s.bars.length-1]);
+  return s._hr=runs.filter(r=>r[1]-r[0]>=3).map(r=>({start:s.bars[r[0]][0],end:s.bars[r[1]][0]}));
+}
+const dirOf=x=>{const r=eff(x.m)/curEff;return r>1.03?'up':r<.97?'down':'same'};
+
+// ---- choosing the next song: every song that fits is a candidate; pick at random among the near-best, skipping recent ones
+const candidates=(c,excl)=>{const r=[];for(const s of songs){if(s===excl)continue;const m=match(s,c);if(m)r.push({s,m})}return r};
+const bestOf=a=>a.reduce((x,y)=>!x||y.m.cost<x.m.cost?y:x,null);
+function shuffle(pool){
+  const skip=new Set(recent.slice(-Math.min(4,Math.max(0,pool.length-1)))),fresh=pool.filter(x=>!skip.has(x.s.id));
+  const from=fresh.length?fresh:pool;return from[Math.floor(rng()*from.length)];
+}
+
+// ---- where in the NEW song does the fade-in land on the exit point?
+//  same/up tempo: its first high-energy section (the high carries straight into a chorus/drop)
+//  down tempo:   a phrase start whose energy is a bit below the outgoing song's
+function pickEntry(s,Lo,dir,xf){
+  let t=s.first_bar!=null?s.first_bar:0,why='its first bar';
+  if(s.bars&&s.bars.length){
+    if(dir==='down'){
+      const tg=Math.max(.2,Lo-.25),c=s.bars.filter(b=>b[2]===1&&b[0]<=.7*(s.dur||1e9));
+      if(c.length){t=c.reduce((a,b)=>Math.abs(lv(b)-tg)<Math.abs(lv(a)-tg)-1e-9?b:a)[0];why='a calmer section'}
+    }else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
+  }
+  const sp=t-xf;return {tAlign:t,startPos:Math.max(0,sp),delay:Math.max(0,-sp),why};
+}
+// ---- where in the CURRENT song does the fade END?  The fade runs [T−xf, T].
+//  rot (steady tempo, another song fits): leave right after the LAST chorus ends, don't sit through the outro.
+//  'bar': first 8-bar phrase start.  'section': structure score + energy (high for same/up, lower for down),
+//  bonus for the bar right after a chorus ends; looks further ahead if the next stretch is a lull.
+function pickExit(s,el,st,dir,rot){
+  const tmin=Math.max(base+st.min,el+st.xf+0.3),c=s.bars.filter(b=>b[0]>=tmin);
+  if(!c.length)return null;
+  if(rot){
+    const hr=highRuns(s),last=hr[hr.length-1];
+    if(last)return last.end>=tmin?last.end:c[0][0];          // already past the last chorus → leave at the first chance
+    const len=AU[ai].duration||s.dur||0,tg=Math.max(tmin,.75*len),f=c.find(b=>b[0]>=tg&&b[2]===1)||c.find(b=>b[0]>=tg);
+    return f?f[0]:null;                                      // no chorus info: leave around 3/4 of the way through
+  }
+  if(st.swap==='bar')return (c.find(b=>b[2]===1)||c[0])[0];
+  const ends=highRuns(s).map(r=>r.end),afterChorus=b=>ends.some(e=>Math.abs(e-b[0])<0.02);
+  const val=b=>0.4*b[1]+0.6*(dir==='down'?1-lv(b):lv(b))+(dir!=='down'&&afterChorus(b)?0.35:0);
+  const pick=w=>c.filter(b=>b[0]<=c[0][0]+w).reduce((a,b)=>val(b)>val(a)+1e-9?b:a);
+  let b=pick(st.wait);
+  if(dir!=='down'&&b[3]!=null&&b[3]<.55)b=pick(st.wait*3);
+  return b[0];
+}
+// songs with no beat/section data: leave at the earliest allowed moment (rotation: about 3/4 through)
+const plainExit=(el,st,rot)=>{const tmin=Math.max(base+st.min,el+st.xf+0.3);return rot?Math.max(tmin,.75*(AU[ai].duration||cur.dur||0)):tmin};
+function makePlan(x,el,st){
+  const dir=dirOf(x),hasBars=cur.bars&&cur.bars.length;
+  const T=hasBars?pickExit(cur,el,st,dir,x.rot):plainExit(el,st,x.rot);
+  if(T==null||T>=(AU[ai].duration||cur.dur||1e9)-st.xf-1)return null;
+  return {T,fadeAt:T-st.xf,x,dir,rot:!!x.rot,entry:pickEntry(x.s,hasBars?lv(barAt(cur,T)):.5,dir,st.xf)};
+}
+
+// Pre-load the next song on the idle player so the fade doesn't wait on the network/decoder
+function prep(x,entry){
+  const n=AU[1-ai];n.src=srcFor(x.s);n.preload='auto';n.volume=0;prepId=x.s.id;prepSp=entry.startPos;
+  if(entry.startPos>0.05)n.addEventListener('loadedmetadata',()=>{n.currentTime=entry.startPos},{once:true});
+}
+function fadeStep(){   // time-based, so the fade ends exactly xf seconds after it starts
+  const f=Math.min(1,(performance.now()-fadeStart)/(fadeLen*1000)),[gi,go]=gain(f);
+  fadeNew.volume=gi;fadeOld.volume=go;
+  if(f>=1){clearInterval(fadeT);fading=false;fadeOld.pause()}
+}
+function crossfade(x,entry){
+  const xf=cur?S().xf:0,old=AU[ai];ai=1-ai;const n=AU[ai],e=entry||{startPos:0,delay:0};   // first song starts at full volume
+  if(!(prepId===x.s.id&&prepSp===e.startPos)){
+    n.src=srcFor(x.s);
+    if(e.startPos>0.05)n.addEventListener('loadedmetadata',()=>{n.currentTime=e.startPos},{once:true});
+  }
+  prepId=null;n.volume=xf>0?0:1;
+  const go=()=>n.play().catch(err=>log('⚠ playback blocked: '+err.message));
+  e.delay>0?setTimeout(go,e.delay*1000):go();
+  clearInterval(fadeT);fading=false;
+  if(xf>0){fadeNew=n;fadeOld=old;fadeLen=xf;fadeStart=performance.now();fading=true;fadeT=setInterval(fadeStep,40)}else old.pause();
+  cur=x.s;recent.push(x.s.id);if(recent.length>30)recent.shift();curEff=eff(x.m);
+  pend=null;keep=null;boundary=null;plan=null;disarm();base=e.startPos;lastEl=e.startPos;lastKey='';
+}
+function disarm(){clearInterval(armT);armT=null}
+function armCheck(){   // 25 ms poll while a swap is planned, so the fade starts on time
+  if(!plan||!cur){disarm();return}
+  if(fading)return;
+  if(AU[ai].currentTime>=plan.fadeAt){const p=plan;log(`🔀 fading to ${name(p.x.s)} (${desc(p.x.m)}), fade ends at ${fmt(p.T)}; it enters at ${p.entry.why}`);crossfade(p.x,p.entry);render()}
+}
+function arm(){if(!armT)armT=setInterval(armCheck,25)}
+const dirTxt={same:'same tempo',up:'tempo up',down:'tempo down'};
+
+function loop(){
+  const b=cadence(),st=S();
+  if(!cur){
+    const cs=candidates(b,null),bc=bestOf(cs);
+    if(bc){const x=shuffle(cs.filter(y=>y.m.cost<=bc.m.cost+st.spread));log(`▶ start: ${name(x.s)} (${desc(x.m)})`);crossfade(x)}
+    else logOnce('hole',`⏹ silence: nothing fits ${b} BPM`);
+    return render();
+  }
+  const a=AU[ai],el=a.currentTime,len=a.duration||cur.dur||1e9;
+  if(fading){lastEl=el;return render()}   // never start a second fade on top of a running one
+  const mc=match(cur,b),ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
+  const needSwap=bc&&(!ok||bc.m.cost+st.mar<=mc.cost);
+  let pool=null,rot=false;
+  if(needSwap)pool=cs.filter(x=>x.m.cost<=bc.m.cost+st.spread);                       // clearly better / current no longer fits
+  else if(st.rotate&&ok&&bc){pool=cs.filter(x=>x.m.cost<=mc.cost+st.spread);rot=true} // steady tempo: rotate to another fitting song
+  if(pool&&pool.length){
+    if(!(keep&&keep.cur===cur&&keep.rot===rot&&pool.some(x=>x.s===keep.s)))keep={cur,rot,s:shuffle(pool).s};   // pick once, stay stable
+    pend=pool.find(x=>x.s===keep.s);pend.rot=rot;
+  }else{pend=null;keep=null}
+  if(a.ended||el>=len-st.xf-0.5){   // song is about to end anyway: fade so it finishes with the file
+    let nx=pend;plan=null;disarm();
+    if(!nx){const all=ok?[{s:cur,m:mc},...cs]:cs,ba=bestOf(all);
+      if(ba){const near=all.filter(x=>x.m.cost<=ba.m.cost+st.spread),oth=near.filter(x=>x.s!==cur);nx=shuffle(oth.length?oth:near)}}
+    if(nx){const dir=dirOf(nx),en=pickEntry(nx.s,cur.bars&&cur.bars.length?lv(barAt(cur,el)):.5,dir,st.xf);
+      log(`⏭ song ending → ${name(nx.s)} (${desc(nx.m)}, ${dirTxt[dir]}), enters at ${en.why}`);crossfade(nx,en)}
+    else{log(`⏹ song ended, nothing fits ${b} BPM`);a.pause();cur=null}
+    return render();
+  }
+  if(!pend){plan=null;disarm();boundary=null;if(!ok)logOnce('out',`⚠ nothing fits ${b} BPM, playing out ${cur.title}`);lastEl=el;return render()}
+  if(!plan||plan.x.s!==pend.s||plan.rot!==!!pend.rot){plan=makePlan(pend,el,st);if(plan)prep(plan.x,plan.entry)}else plan.x=pend;
+  if(plan){
+    boundary=plan.T;arm();
+    logOnce('p'+pend.s.id+'|'+Math.round(plan.T),`⏳ ${plan.rot?'rotating to':'queued'} ${name(pend.s)} (${desc(pend.m)}, ${dirTxt[plan.dir]}): fade ${fmt(plan.fadeAt)}→${fmt(plan.T)}, enters at ${plan.entry.why} (${fmt(plan.entry.tAlign)})`);
+    if(el>=plan.fadeAt)armCheck();
+  }else{boundary=null;logOnce('n'+pend.s.id,`⏳ ${name(pend.s)} waiting: no exit point before the song ends`)}
+  lastEl=el;render();
+}
+
+function draw(){
+  const c=$('wave'),g=c.getContext&&c.getContext('2d');if(!g)return;
+  const W=c.width,H=c.height,cs=getComputedStyle(document.documentElement),col=v=>cs.getPropertyValue(v).trim();
+  g.clearRect(0,0,W,H);if(!cur||!cur.wave)return;
+  const a=AU[ai],len=a.duration||cur.dur||1,x=t=>t/len*W,n=cur.wave.length,el=a.currentTime;
+  for(let i=0;i<n;i++){const done=i/n*len<el,h=Math.max(1,cur.wave[i]/100*H*0.9);g.globalAlpha=done?1:.4;g.fillStyle=done?col('--acc'):col('--mut');g.fillRect(i/n*W,(H-h)/2,Math.max(1,W/n-1),h)}
+  g.globalAlpha=.7;g.fillStyle=col('--ok');(cur.bars||[]).forEach(b=>{if(b[1]>=.6)g.fillRect(x(b[0]),0,2,10)});
+  g.globalAlpha=1;g.fillStyle=col('--mut');g.fillRect(x(base+S().min),0,2,H);
+  if(plan){g.fillStyle=col('--q');g.globalAlpha=.25;g.fillRect(x(plan.fadeAt),0,x(plan.T)-x(plan.fadeAt),H);g.globalAlpha=1;g.fillRect(x(plan.T),0,3,H)}
+  g.fillStyle=col('--fg');g.fillRect(x(el),0,2,H);
+}
+
+function render(){
+  const st=S(),b=cadence(),a=AU[ai],len=cur?(a.duration||cur.dur||0):0,el=cur?a.currentTime:0;
+  $('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':'steps / BPM · manual';
+  const mc=cur&&match(cur,b);
+  $('np').textContent=cur?name(cur):(timer?'Silence':'Press Start');
+  $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range'):'';
+  $('fill').style.width=len?Math.min(100,el/len*100)+'%':'0';
+  $('mkmin').style.left=len?Math.min(100,(base+st.min)/len*100)+'%':'0';
+  const mb=$('mkb');if(cur&&boundary&&len){mb.style.display='block';mb.style.left=Math.min(100,boundary/len*100)+'%'}else mb.style.display='none';
+  $('el').textContent=cur?`${fmt(el)} / ${fmt(len)}`:'';
+  $('pend').innerHTML=pend?`<span class="pill q">Queued next</span> ${name(pend.s)} <span class="small">${desc(pend.m)}</span>`:(cur?'<span class="pill ok">No swap pending</span>':'');
+  // rebuild the list only when something relevant changed, so typing in an energy box isn't interrupted
+  const k=[b,cur&&cur.id,ver,JSON.stringify(st)].join('|');
+  if(k!==listKey){listKey=k;
+    $('list').innerHTML=songs.map(t=>{const m=match(t,b),alts=(t.alts||[]).map(x=>`${x.bpm}@${x.conf}`).join(', ');
+      return `<li class="${m?'in':''} ${t===cur?'cur':''}"><span>${t===cur?'▶ ':''}${t.title} <span class="small">${t.artist}${m&&m.mode!=='1:1'?' · '+m.mode:''}</span></span>
+      <span title="${[alts?'alt tempos: '+alts:'',t.tempo_src?'tempo: '+t.tempo_src+(t.tempo_conf!=null?' (conf '+t.tempo_conf+', '+t.tempo_agree+'/3 estimators agree)':''):''].filter(Boolean).join(' · ')}">${t.bpm} <span class="small">${t.src}</span> ⚡<input class="en" type="number" step="0.1" min="0" max="1" value="${t.energy.toFixed(2)}" onchange="setEn(${t.id},this.value)">
+      <button class="s" onclick="adj(${t.id},0.5)">½</button><button class="s" onclick="adj(${t.id},2)">×2</button></span></li>`}).join('')}
+}
+
+async function adj(id,f){const t=songs[id];t.bpm=Math.round(t.bpm*f*10)/10;t.src='edited';t.alts=[];ver++;await post('/api/bpm',{id,bpm:t.bpm});render()}
+async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||0));ver++;await post('/api/energy',{id,energy:t.energy})}
+$('go').onclick=()=>{
+  if(timer){clearInterval(timer);timer=null;AU.forEach(a=>a.pause());cur=null;plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';return render()}
+  AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
+  $('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
+};
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+setInterval(draw,100);
+// ======================= phone-only additions =======================
+const native=window.RunDJNative&&window.RunDJNative.isNative?window.RunDJNative:null;
+const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAwake.allowSleep()}catch(e){}};
+let src='manual',hcCad=null,hcOk=false,hcTimer=null;
+
+// ---- storage: songs live in IndexedDB so they survive app restarts
+let db=null,blobs={},urls={};
+const idb=()=>db?Promise.resolve(db):new Promise((res,rej)=>{const r=indexedDB.open('rundj',1);
+  r.onupgradeneeded=()=>{r.result.createObjectStore('meta',{keyPath:'file'});r.result.createObjectStore('blob')};
+  r.onsuccess=()=>res(db=r.result);r.onerror=()=>rej(r.error)});
+const tx=(name,mode,fn)=>idb().then(d=>new Promise((res,rej)=>{
+  const t=d.transaction(name,mode);let out;
+  t.oncomplete=()=>res(out&&typeof out==='object'&&'result' in out?out.result:out);t.onerror=t.onabort=()=>rej(t.error);
+  out=fn(t.objectStore(name))}));
+const srcFor=s=>urls[s.file]||(urls[s.file]=URL.createObjectURL(blobs[s.file]));
+const saveMeta=s=>{const {id,_hr,...m}=s;return tx('meta','readwrite',st=>st.put(m))};
+const post=(p,o)=>saveMeta(songs[o.id]);                      // ½ / ×2 / energy edits persist on the phone
+const say=(id,t)=>{$(id).textContent=t};
+
+async function loadLibrary(){
+  const metas=await tx('meta','readonly',s=>s.getAll()),keys=await tx('blob','readonly',s=>s.getAllKeys()),vals=await tx('blob','readonly',s=>s.getAll());
+  blobs={};keys.forEach((k,i)=>blobs[k]=vals[i]);
+  songs=metas.filter(m=>blobs[m.file]).sort((a,b)=>a.file.localeCompare(b.file)).map((m,i)=>({...m,id:i}));
+  say('count',`${songs.length} songs`);
+  say('libstatus',songs.length?`${songs.length} songs ready.`:'No songs yet. Tap Import and select library.json plus your audio files together.');
+  ver++;render();
+}
+async function importFiles(files){
+  const isJ=f=>/\.json$/i.test(f.name),audio=new Map(files.filter(f=>!isJ(f)).map(f=>[f.name,f]));let metas=[],bad=[];
+  for(const j of files.filter(isJ)){try{const d=JSON.parse(await j.text());metas=metas.concat(Array.isArray(d)?d:(d.songs||[]))}catch(e){bad.push(j.name)}}
+  const have=new Set(songs.map(s=>s.file)),fileOf=new Set(metas.map(m=>m.file));
+  let added=0;const noAudio=[];let noMeta=0;
+  await tx('meta','readwrite',s=>{for(const m of metas){if(audio.has(m.file)||have.has(m.file)){s.put(m);added++}else noAudio.push(m.file)}});
+  await tx('blob','readwrite',s=>{for(const [n,f] of audio){if(fileOf.has(n)||have.has(n))s.put(f,n);else noMeta++}});
+  say('impmsg',`Imported ${added} songs.`+(noAudio.length?` ${noAudio.length} library entries had no matching audio file (e.g. ${noAudio[0]}).`:'')
+    +(noMeta?` ${noMeta} audio files had no analysis in library.json and were skipped.`:'')+(bad.length?` Could not read: ${bad.join(', ')}.`:''));
+  await loadLibrary();
+}
+async function clearLibrary(){await tx('meta','readwrite',s=>s.clear());await tx('blob','readwrite',s=>s.clear());Object.values(urls).forEach(u=>URL.revokeObjectURL(u));urls={};say('impmsg','Library cleared.');await loadLibrary()}
+
+// ---- cadence source: manual slider, or steps from Health Connect
+const cadence=()=>src==='hc'?(hcCad==null?0:hcCad):+$('bpm').value;
+function setSrc(v){
+  src=v;$('src_manual').classList.toggle('p',v==='manual');$('src_hc').classList.toggle('p',v==='hc');
+  $('bpm').disabled=v==='hc';$('hcbox').style.display=v==='hc'?'block':'none';
+  try{localStorage.setItem('rundj_src',v)}catch(e){}
+  v==='hc'?hcStart():hcStop();render();
+}
+// One source only (the one with the freshest data) so two apps writing the same steps aren't double counted.
+// The window is anchored on the newest record, so a few minutes of sync lag doesn't make the cadence read low.
+function computeCadence(samples,now,winMs,staleMs){
+  const by={};for(const s of samples){const k=s.sourceId||s.sourceName||'?';(by[k]=by[k]||[]).push(s)}
+  let best=null,newest=0;
+  for(const k in by){const e=Math.max(...by[k].map(s=>Date.parse(s.endDate)));if(e>newest){newest=e;best=k}}
+  if(!best)return {cad:null,age:null,src:null,n:0,steps:0};
+  const age=now-newest,lo=newest-winMs;let steps=0;
+  for(const s of by[best]){const a=Date.parse(s.startDate),b=Date.parse(s.endDate);if(!(b>a))continue;
+    const x=Math.max(a,lo),y=Math.min(b,newest);if(y>x)steps+=s.value*(y-x)/(b-a)}
+  return {cad:age>staleMs?0:steps/(winMs/60000),age,src:best,n:by[best].length,steps};
+}
+const H=native&&native.Health;
+async function hcCheck(){if(!H)return false;try{const st=await H.checkAuthorization({read:['steps']});hcOk=(st.readAuthorized||[]).includes('steps')}catch(e){hcOk=false}return hcOk}
+async function hcConnect(){
+  if(!H){say('hcstatus','Health Connect only works inside the Android app.');return}
+  try{
+    const av=await H.isAvailable();
+    if(!av.available){say('hcstatus','Health Connect is not available: '+(av.reason||'unknown')+'. On Android 13 or older, install “Health Connect” from the Play Store.');try{await H.openHealthConnectSettings()}catch(e){}return}
+    const st=await H.requestAuthorization({read:['steps']});hcOk=(st.readAuthorized||[]).includes('steps');
+    say('hcstatus',hcOk?'Connected. Reading steps…':'Steps permission not granted. Tap Connect again, or allow it under Health Connect → App permissions.');
+    if(hcOk)hcStart();
+  }catch(e){say('hcstatus','Error: '+(e.message||e))}
+}
+function hcStop(){clearInterval(hcTimer);hcTimer=null}
+function hcStart(){hcStop();if(!hcOk){say('hcstatus','Not connected. Tap Connect.');return}hcPoll();hcTimer=setInterval(hcPoll,Math.max(3,+$('hcpoll').value||10)*1000)}
+async function hcPoll(){
+  if(!H||!hcOk)return;
+  try{
+    const now=Date.now(),win=(+$('hcwin').value||120)*1000,stale=(+$('hcstale').value||240)*1000;
+    const r=await H.readSamples({dataType:'steps',startDate:new Date(now-win-stale).toISOString(),endDate:new Date(now+1000).toISOString(),limit:500,ascending:true});
+    const c=computeCadence(r.samples||[],now,win,stale);hcCad=c.cad;
+    say('hcstatus',c.n?`${Math.round(c.cad)} steps/min · newest record ${Math.round(c.age/1000)}s old · ${c.n} records from ${c.src}${c.cad===0?' · too old, treating as stopped':''}`
+      :`No step records in the last ${Math.round((win+stale)/60000)} min. Is a step-tracking app (e.g. Google Fit) writing to Health Connect?`);
+    render();
+  }catch(e){say('hcstatus','Read failed: '+(e.message||e))}
+}
+async function hcTest(){
+  if(!H){log('Health Connect test: only works inside the Android app');return}
+  if(!await hcCheck()){log('Health Connect test: steps permission not granted. Tap Connect first.');return}
+  try{
+    const now=Date.now(),r=await H.readSamples({dataType:'steps',startDate:new Date(now-30*60000).toISOString(),endDate:new Date(now+1000).toISOString(),limit:500,ascending:true});
+    const by={};for(const s of r.samples||[]){const k=s.sourceName||s.sourceId||'?';const o=by[k]=by[k]||{n:0,steps:0,end:0};o.n++;o.steps+=s.value;o.end=Math.max(o.end,Date.parse(s.endDate))}
+    const ks=Object.keys(by);
+    log(ks.length?`HC test (last 30 min): `+ks.map(k=>`${k}: ${by[k].n} records, ${Math.round(by[k].steps)} steps, newest ${Math.round((now-by[k].end)/1000)}s ago`).join(' | '):'HC test: no step records in the last 30 min. Open your step-tracking app and check it writes to Health Connect.');
+  }catch(e){log('HC test failed: '+(e.message||e))}
+}
+
+// ---- remember settings between launches
+const SAVED=['bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','rotate','half','alt'];
+function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
+function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
+
+$('src_manual').onclick=()=>setSrc('manual');$('src_hc').onclick=()=>setSrc('hc');
+$('hcconnect').onclick=hcConnect;$('hctest').onclick=hcTest;
+$('imp').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
+$('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
+SAVED.forEach(id=>{$(id).addEventListener('change',saveSettings);$(id).addEventListener('input',saveSettings)});
+async function initApp(){
+  loadSettings();render();
+  await loadLibrary();
+  const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
+  if(want==='hc'){await hcCheck();setSrc('hc')}else setSrc('manual');
+}
+
+initApp();
+</script></body></html>

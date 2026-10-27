@@ -1,0 +1,23 @@
+{
+  "name": "rundj-phone",
+  "version": "0.1.0",
+  "description": "Run DJ: cadence-matched music player (test app)",
+  "scripts": {
+    "bundle": "esbuild src/bridge.js --bundle --format=iife --minify --outfile=www/bridge.js",
+    "page": "python3 tools/build_phone.py",
+    "build": "npm run bundle && npm run page && cap sync android",
+    "open": "cap open android",
+    "run": "cap run android"
+  },
+  "dependencies": {
+    "@capacitor-community/keep-awake": "^8.0.1",
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capgo/capacitor-health": "^8.11.12"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "private": true
+}

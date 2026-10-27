@@ -1,0 +1,6 @@
+{
+  "appId": "dev.krish.rundj",
+  "appName": "Run DJ",
+  "webDir": "www",
+  "android": { "webContentsDebuggingEnabled": true }
+}

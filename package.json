@@ -14,7 +14,8 @@
     "@capacitor/android": "^8.5.3",
     "@capacitor/cli": "^8.5.3",
     "@capacitor/core": "^8.5.3",
-    "@capgo/capacitor-health": "^8.11.12"
+    "@capgo/capacitor-health": "^8.11.12",
+    "@capgo/capacitor-pedometer": "^8.0.52"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

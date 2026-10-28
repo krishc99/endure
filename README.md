@@ -23,8 +23,11 @@ npm run open         # opens Android Studio; press Run with the phone connected
 
 ## 3. On the phone
 1. **Import songs…** → select `library.json` and the audio files *together* in the picker. They are copied into the app, so you only do this once.
-2. **Manual** mode: drag the slider, press Start.
-3. **Health Connect** mode: tap *Connect*, allow "Steps". Tap *Test read* to see which app is writing steps and how fresh they are.
+2. Pick where your cadence comes from:
+   - **Phone motion** (best for running): live from the accelerometer, reads a change in pace within a few seconds. Carry the phone in a pocket, armband or hand.
+   - **Step counter**: the phone's hardware step counter (asks for the Physical activity permission).
+   - **Manual**: drag the slider.
+   - **Health Connect**: steps another app wrote; lags by minutes. Tap *Connect*, then *Test read*.
 4. Keep the screen on while running (the app does this itself while playing).
 
 ## Important

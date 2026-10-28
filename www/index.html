@@ -34,9 +34,10 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
 <div><h1>🏃 Run DJ</h1><div class="small" id="count"></div></div>
 <section class="card">
   <div class="lbl">Cadence source</div>
-  <div class="row seg"><button id="src_manual" class="p">Manual</button><button id="src_hc">Health Connect</button></div>
+  <div class="row seg"><button id="src_manual" class="p">Manual</button><button id="src_motion">Phone motion</button><button id="src_ped">Step counter</button><button id="src_hc">Health Connect</button></div>
   <div class="row" style="margin-top:10px"><span class="big" id="bpmv">150</span><span class="small" id="cadsub">steps / BPM · manual</span></div>
   <input type="range" id="bpm" min="60" max="190" value="150">
+  <div id="livebox" style="display:none;margin-top:8px"><div class="small" id="livestatus">—</div></div>
   <div id="hcbox" style="display:none;margin-top:8px">
     <div class="row" style="justify-content:flex-start"><button id="hcconnect">Connect</button><button id="hctest">Test read</button></div>
     <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
@@ -67,6 +68,8 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Step window (s)<input type="number" id="hcwin" value="120"></label>
   <label>Treat data as stopped after (s)<input type="number" id="hcstale" value="240"></label>
   <label>Health Connect poll (s)<input type="number" id="hcpoll" value="10"></label>
+  <label>Motion sensitivity (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
+  <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>
   <label>Energy weight (BPM)<input type="number" id="ew" value="3" step="0.5"></label>
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
@@ -281,10 +284,88 @@ $('go').onclick=()=>{
 };
 ['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
+// Cadence (steps/min) straight from the phone's accelerometer: no step counting, no sync lag.
+// Orientation-independent (uses the magnitude of acceleration), then finds the repeat period of the motion by
+// autocorrelation over the last few seconds. Of the strong repeat periods it takes the shortest, i.e. the step
+// rate rather than the stride rate (two steps).
+class MotionCadence {
+  constructor(o = {}) {
+    this.win = o.win || 4000;          // ms of motion analysed
+    this.minStd = o.minStd || 0.5;     // m/s²: below this the phone is treated as still / not moving with steps
+    this.rate = 100;                   // resample rate (Hz)
+    this.buf = []; this.hist = []; this.lastT = 0; this.lastCalc = 0;
+  }
+  push(t, ax, ay, az) {                // t: ms, monotonic. a*: m/s², gravity included
+    this.buf.push([t, Math.sqrt(ax * ax + ay * ay + az * az)]); this.lastT = t;
+    const cut = t - this.win - 600; while (this.buf.length && this.buf[0][0] < cut) this.buf.shift();
+    if (t - this.lastCalc >= 500 && this.buf.length > 30 && t - this.buf[0][0] >= this.win) { this.lastCalc = t; this._calc(t); }
+  }
+  _calc(t) {
+    const n = Math.round(this.win / 1000 * this.rate), t0 = t - this.win, b = this.buf;
+    let x = new Float64Array(n), j = 0;
+    for (let i = 0; i < n; i++) {                                   // uniform 100 Hz, linear interpolation
+      const ti = t0 + i * 1000 / this.rate;
+      while (j < b.length - 2 && b[j + 1][0] < ti) j++;
+      const a = b[j], c = b[j + 1], f = c[0] > a[0] ? Math.min(1, Math.max(0, (ti - a[0]) / (c[0] - a[0]))) : 0;
+      x[i] = a[1] + (c[1] - a[1]) * f;
+    }
+    const hw = Math.round(this.rate * 0.5), y = new Float64Array(n);  // remove gravity/orientation drift (1 s moving mean)
+    let s = 0, cnt = 0, lo = 0, hi = 0;
+    for (let i = 0; i < n; i++) {
+      while (hi < n && hi <= i + hw) { s += x[hi]; hi++; cnt++; }
+      while (lo < i - hw) { s -= x[lo]; lo++; cnt--; }
+      y[i] = x[i] - s / cnt;
+    }
+    for (let i = n - 1; i >= 2; i--) y[i] = (y[i] + y[i - 1] + y[i - 2]) / 3;   // light smoothing
+    let e = 0; for (let i = 0; i < n; i++) e += y[i] * y[i];
+    const std = Math.sqrt(e / n);
+    this.std = std;
+    if (std < this.minStd) { this._add(0); return; }
+    const raw = this._period(y);                                   // repeat period of the whole motion
+    // Foot strikes are sharp transients at EVERY step. Arm/body sway (smooth, often at the stride rate) is not.
+    // So also look at the high-passed envelope: it keeps the impacts and drops the sway.
+    const hw2 = Math.round(this.rate * 0.1), env = new Float64Array(n);
+    let hs = 0;
+    for (let i = 0; i < n; i++) {
+      let sum = 0, c = 0; for (let k = Math.max(0, i - hw2); k <= Math.min(n - 1, i + hw2); k++) { sum += x[k]; c++; }
+      env[i] = Math.abs(x[i] - sum / c); hs += env[i] * env[i];
+    }
+    this.impactStd = Math.sqrt(hs / n);
+    for (let i = n - 1; i >= 4; i--) env[i] = (env[i] + env[i - 1] + env[i - 2] + env[i - 3] + env[i - 4]) / 5;
+    let mean = 0; for (let i = 0; i < n; i++) mean += env[i]; mean /= n; for (let i = 0; i < n; i++) env[i] -= mean;
+    const imp = this.impactStd >= 0.3 ? this._period(env) : null;
+    let pick = raw;
+    if (imp && imp.r >= 0.4 && (!raw || Math.abs(imp.cad - raw.cad) / raw.cad < 0.08 || Math.abs(imp.cad - 2 * raw.cad) / (2 * raw.cad) < 0.1)) pick = imp;
+    if (!pick) { this._add(0); return; }
+    this.quality = pick.r; this._add(pick.cad);
+  }
+  // Shortest strong repeat period of y, as steps/min. Lags 0.24–1.0 s = 250…60 steps/min.
+  _period(y) {
+    const n = y.length, L0 = 24, L1 = 100, r = new Float64Array(L1 + 2);
+    for (let l = L0 - 1; l <= L1 + 1; l++) {
+      let num = 0, a2 = 0, b2 = 0;
+      for (let i = 0; i + l < n; i++) { num += y[i] * y[i + l]; a2 += y[i] * y[i]; b2 += y[i + l] * y[i + l]; }
+      r[l] = num / Math.sqrt(a2 * b2 + 1e-12);
+    }
+    const peaks = []; let mx = 0;
+    for (let l = L0; l <= L1; l++) if (r[l] > r[l - 1] && r[l] >= r[l + 1] && r[l] > 0.15) { peaks.push(l); mx = Math.max(mx, r[l]); }
+    if (!peaks.length) return null;
+    const l = peaks.find(p => r[p] >= 0.6 * mx), d = r[l - 1] - 2 * r[l] + r[l + 1];
+    const lf = l + (d < 0 ? 0.5 * (r[l - 1] - r[l + 1]) / d : 0);   // sub-sample refinement
+    return { cad: 6000 / lf, r: r[l] };
+  }
+  _add(v) { this.hist.push(v); if (this.hist.length > 5) this.hist.shift(); }
+  // Smoothed cadence: median of the last few estimates. 0 = still, null = not enough data yet.
+  cadence() {
+    if (this.hist.length < 3) return null;
+    const h = [...this.hist].sort((a, b) => a - b); return h[h.length >> 1];
+  }
+}
+if (typeof module !== 'undefined') module.exports = { MotionCadence };
 // ======================= phone-only additions =======================
 const native=window.RunDJNative&&window.RunDJNative.isNative?window.RunDJNative:null;
 const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAwake.allowSleep()}catch(e){}};
-let src='manual',hcCad=null,hcOk=false,hcTimer=null;
+let src='manual',hcCad=null,hcOk=false,hcTimer=null,motionCad=null,pedCad=null;
 
 // ---- storage: songs live in IndexedDB so they survive app restarts
 let db=null,blobs={},urls={};
@@ -322,12 +403,71 @@ async function importFiles(files){
 async function clearLibrary(){await tx('meta','readwrite',s=>s.clear());await tx('blob','readwrite',s=>s.clear());Object.values(urls).forEach(u=>URL.revokeObjectURL(u));urls={};say('impmsg','Library cleared.');await loadLibrary()}
 
 // ---- cadence source: manual slider, or steps from Health Connect
-const cadence=()=>src==='hc'?(hcCad==null?0:hcCad):+$('bpm').value;
+const cadence=()=>{const c=src==='hc'?hcCad:src==='motion'?motionCad:src==='ped'?pedCad:+$('bpm').value;return c==null?0:c};
+const SRCS=['manual','motion','ped','hc'];
 function setSrc(v){
-  src=v;$('src_manual').classList.toggle('p',v==='manual');$('src_hc').classList.toggle('p',v==='hc');
-  $('bpm').disabled=v==='hc';$('hcbox').style.display=v==='hc'?'block':'none';
+  src=v;SRCS.forEach(k=>$('src_'+k).classList.toggle('p',k===v));
+  $('bpm').disabled=v!=='manual';$('hcbox').style.display=v==='hc'?'block':'none';$('livebox').style.display=v==='motion'||v==='ped'?'block':'none';
   try{localStorage.setItem('rundj_src',v)}catch(e){}
-  v==='hc'?hcStart():hcStop();render();
+  hcStop();motionStop();pedStop();motionCad=pedCad=null;
+  if(v==='hc')hcStart();else if(v==='motion')motionStart();else if(v==='ped')pedStart();
+  render();
+}
+
+// ---- live source 1: phone motion (accelerometer), instant. See motion.js.
+let mDet=null,mTimer=null,mWall=0;
+function onMotion(e){
+  const a=e.accelerationIncludingGravity;if(!a||a.x==null||!mDet)return;
+  mWall=performance.now();mDet.push(e.timeStamp||mWall,a.x,a.y,a.z);
+}
+async function motionStart(){
+  mDet=new MotionCadence({minStd:+$('mmin').value||0.5});mWall=0;
+  try{if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
+    if(await DeviceMotionEvent.requestPermission()!=='granted'){say('livestatus','Motion permission denied.');return}}}catch(e){}
+  window.addEventListener('devicemotion',onMotion);say('livestatus','Waiting for motion data…');
+  mTimer=setInterval(motionTick,500);
+}
+function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null}
+function motionTick(){
+  if(!mDet)return;
+  mDet.minStd=+$('mmin').value||0.5;
+  if(!mWall||performance.now()-mWall>2500){motionCad=null;
+    say('livestatus',mWall?'The motion sensor stopped sending data.':'No motion data yet. This phone or WebView may not expose the accelerometer.');render();return}
+  const c=mDet.cadence();motionCad=c;
+  say('livestatus',c==null?'Collecting a few seconds of motion…':c===0?'Not moving with steps (cadence 0)':
+    `${Math.round(c)} steps/min · live from phone motion · signal ${(mDet.quality||0).toFixed(2)}`);
+  render();
+}
+
+// ---- live source 2: the phone's hardware step counter (Android TYPE_STEP_COUNTER)
+const PED=native&&native.Pedometer;let pedOn=false,pedSamples=[],pedHandle=null,pedTimer=null;
+// steps/min over the last winMs. The counter only reports when it changes, so no report for stopMs means "stopped".
+function pedCompute(samples,now,winMs,stopMs){
+  if(!samples.length)return null;
+  const newest=samples[samples.length-1];if(now-newest[0]>stopMs)return 0;
+  const lo=now-winMs;let base=samples[0];for(const s of samples){if(s[0]<=lo)base=s;else break}
+  return (newest[1]-base[1])*60000/Math.max(Math.min(winMs,now-base[0]),4000);
+}
+async function pedStart(){
+  if(!PED){say('livestatus','The step counter only works inside the Android app.');return}
+  try{
+    const av=await PED.isAvailable();if(!av.stepCounting){say('livestatus','This phone reports no hardware step counter.');return}
+    let p=await PED.checkPermissions();if(p.activityRecognition!=='granted')p=await PED.requestPermissions();
+    if(p.activityRecognition!=='granted'){say('livestatus','Physical activity permission not granted. Allow it in Android Settings → Apps → Run DJ → Permissions.');return}
+    pedSamples=[];pedHandle=await PED.addListener('measurement',ev=>{pedSamples.push([Date.now(),ev.numberOfSteps||0]);if(pedSamples.length>400)pedSamples.shift()});
+    await PED.startMeasurementUpdates();pedOn=true;say('livestatus','Waiting for the first step…');pedTimer=setInterval(pedTick,1000);
+  }catch(e){say('livestatus','Step counter error: '+(e.message||e))}
+}
+async function pedStop(){
+  clearInterval(pedTimer);pedTimer=null;
+  if(pedOn&&PED){try{await PED.stopMeasurementUpdates()}catch(e){}}
+  try{if(pedHandle)await pedHandle.remove()}catch(e){}pedOn=false;pedHandle=null;
+}
+function pedTick(){
+  const now=Date.now(),c=pedCompute(pedSamples,now,(+$('pedwin').value||10)*1000,6000);pedCad=c;
+  const last=pedSamples.length?Math.round((now-pedSamples[pedSamples.length-1][0])/1000):null;
+  say('livestatus',c==null?'No step events yet. Walk a few steps.':c===0?`Stopped (no step events for ${last}s)`:`${Math.round(c)} steps/min · hardware step counter · last event ${last}s ago`);
+  render();
 }
 // One source only (the one with the freshest data) so two apps writing the same steps aren't double counted.
 // The window is anchored on the newest record, so a few minutes of sync lag doesn't make the cadence read low.
@@ -378,11 +518,11 @@ async function hcTest(){
 }
 
 // ---- remember settings between launches
-const SAVED=['bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','rotate','half','alt'];
+const SAVED=['bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','half','alt'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 
-$('src_manual').onclick=()=>setSrc('manual');$('src_hc').onclick=()=>setSrc('hc');
+SRCS.forEach(k=>$('src_'+k).onclick=()=>setSrc(k));
 $('hcconnect').onclick=hcConnect;$('hctest').onclick=hcTest;
 $('imp').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
 $('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
@@ -391,7 +531,8 @@ async function initApp(){
   loadSettings();render();
   await loadLibrary();
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
-  if(want==='hc'){await hcCheck();setSrc('hc')}else setSrc('manual');
+  if(want==='hc')await hcCheck();
+  setSrc(SRCS.includes(want)?want:'manual');
 }
 
 initApp();

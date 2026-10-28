@@ -1,7 +1,7 @@
 // ======================= phone-only additions =======================
 const native=window.RunDJNative&&window.RunDJNative.isNative?window.RunDJNative:null;
 const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAwake.allowSleep()}catch(e){}};
-let src='manual',hcCad=null,hcOk=false,hcTimer=null;
+let src='manual',hcCad=null,hcOk=false,hcTimer=null,motionCad=null,pedCad=null;
 
 // ---- storage: songs live in IndexedDB so they survive app restarts
 let db=null,blobs={},urls={};
@@ -39,12 +39,71 @@ async function importFiles(files){
 async function clearLibrary(){await tx('meta','readwrite',s=>s.clear());await tx('blob','readwrite',s=>s.clear());Object.values(urls).forEach(u=>URL.revokeObjectURL(u));urls={};say('impmsg','Library cleared.');await loadLibrary()}
 
 // ---- cadence source: manual slider, or steps from Health Connect
-const cadence=()=>src==='hc'?(hcCad==null?0:hcCad):+$('bpm').value;
+const cadence=()=>{const c=src==='hc'?hcCad:src==='motion'?motionCad:src==='ped'?pedCad:+$('bpm').value;return c==null?0:c};
+const SRCS=['manual','motion','ped','hc'];
 function setSrc(v){
-  src=v;$('src_manual').classList.toggle('p',v==='manual');$('src_hc').classList.toggle('p',v==='hc');
-  $('bpm').disabled=v==='hc';$('hcbox').style.display=v==='hc'?'block':'none';
+  src=v;SRCS.forEach(k=>$('src_'+k).classList.toggle('p',k===v));
+  $('bpm').disabled=v!=='manual';$('hcbox').style.display=v==='hc'?'block':'none';$('livebox').style.display=v==='motion'||v==='ped'?'block':'none';
   try{localStorage.setItem('rundj_src',v)}catch(e){}
-  v==='hc'?hcStart():hcStop();render();
+  hcStop();motionStop();pedStop();motionCad=pedCad=null;
+  if(v==='hc')hcStart();else if(v==='motion')motionStart();else if(v==='ped')pedStart();
+  render();
+}
+
+// ---- live source 1: phone motion (accelerometer), instant. See motion.js.
+let mDet=null,mTimer=null,mWall=0;
+function onMotion(e){
+  const a=e.accelerationIncludingGravity;if(!a||a.x==null||!mDet)return;
+  mWall=performance.now();mDet.push(e.timeStamp||mWall,a.x,a.y,a.z);
+}
+async function motionStart(){
+  mDet=new MotionCadence({minStd:+$('mmin').value||0.5});mWall=0;
+  try{if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
+    if(await DeviceMotionEvent.requestPermission()!=='granted'){say('livestatus','Motion permission denied.');return}}}catch(e){}
+  window.addEventListener('devicemotion',onMotion);say('livestatus','Waiting for motion data…');
+  mTimer=setInterval(motionTick,500);
+}
+function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null}
+function motionTick(){
+  if(!mDet)return;
+  mDet.minStd=+$('mmin').value||0.5;
+  if(!mWall||performance.now()-mWall>2500){motionCad=null;
+    say('livestatus',mWall?'The motion sensor stopped sending data.':'No motion data yet. This phone or WebView may not expose the accelerometer.');render();return}
+  const c=mDet.cadence();motionCad=c;
+  say('livestatus',c==null?'Collecting a few seconds of motion…':c===0?'Not moving with steps (cadence 0)':
+    `${Math.round(c)} steps/min · live from phone motion · signal ${(mDet.quality||0).toFixed(2)}`);
+  render();
+}
+
+// ---- live source 2: the phone's hardware step counter (Android TYPE_STEP_COUNTER)
+const PED=native&&native.Pedometer;let pedOn=false,pedSamples=[],pedHandle=null,pedTimer=null;
+// steps/min over the last winMs. The counter only reports when it changes, so no report for stopMs means "stopped".
+function pedCompute(samples,now,winMs,stopMs){
+  if(!samples.length)return null;
+  const newest=samples[samples.length-1];if(now-newest[0]>stopMs)return 0;
+  const lo=now-winMs;let base=samples[0];for(const s of samples){if(s[0]<=lo)base=s;else break}
+  return (newest[1]-base[1])*60000/Math.max(Math.min(winMs,now-base[0]),4000);
+}
+async function pedStart(){
+  if(!PED){say('livestatus','The step counter only works inside the Android app.');return}
+  try{
+    const av=await PED.isAvailable();if(!av.stepCounting){say('livestatus','This phone reports no hardware step counter.');return}
+    let p=await PED.checkPermissions();if(p.activityRecognition!=='granted')p=await PED.requestPermissions();
+    if(p.activityRecognition!=='granted'){say('livestatus','Physical activity permission not granted. Allow it in Android Settings → Apps → Run DJ → Permissions.');return}
+    pedSamples=[];pedHandle=await PED.addListener('measurement',ev=>{pedSamples.push([Date.now(),ev.numberOfSteps||0]);if(pedSamples.length>400)pedSamples.shift()});
+    await PED.startMeasurementUpdates();pedOn=true;say('livestatus','Waiting for the first step…');pedTimer=setInterval(pedTick,1000);
+  }catch(e){say('livestatus','Step counter error: '+(e.message||e))}
+}
+async function pedStop(){
+  clearInterval(pedTimer);pedTimer=null;
+  if(pedOn&&PED){try{await PED.stopMeasurementUpdates()}catch(e){}}
+  try{if(pedHandle)await pedHandle.remove()}catch(e){}pedOn=false;pedHandle=null;
+}
+function pedTick(){
+  const now=Date.now(),c=pedCompute(pedSamples,now,(+$('pedwin').value||10)*1000,6000);pedCad=c;
+  const last=pedSamples.length?Math.round((now-pedSamples[pedSamples.length-1][0])/1000):null;
+  say('livestatus',c==null?'No step events yet. Walk a few steps.':c===0?`Stopped (no step events for ${last}s)`:`${Math.round(c)} steps/min · hardware step counter · last event ${last}s ago`);
+  render();
 }
 // One source only (the one with the freshest data) so two apps writing the same steps aren't double counted.
 // The window is anchored on the newest record, so a few minutes of sync lag doesn't make the cadence read low.
@@ -95,11 +154,11 @@ async function hcTest(){
 }
 
 // ---- remember settings between launches
-const SAVED=['bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','rotate','half','alt'];
+const SAVED=['bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','half','alt'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 
-$('src_manual').onclick=()=>setSrc('manual');$('src_hc').onclick=()=>setSrc('hc');
+SRCS.forEach(k=>$('src_'+k).onclick=()=>setSrc(k));
 $('hcconnect').onclick=hcConnect;$('hctest').onclick=hcTest;
 $('imp').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
 $('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
@@ -108,5 +167,6 @@ async function initApp(){
   loadSettings();render();
   await loadLibrary();
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
-  if(want==='hc'){await hcCheck();setSrc('hc')}else setSrc('manual');
+  if(want==='hc')await hcCheck();
+  setSrc(SRCS.includes(want)?want:'manual');
 }

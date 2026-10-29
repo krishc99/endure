@@ -3,6 +3,8 @@
 Plays your songs to match your running cadence. Same engine and UI as the desktop test page, plus
 **Health Connect** step input and a **Manual** slider.
 
+BPM data provided by [GetSongBPM](https://getsongbpm.com).
+
 ## 1. Prepare your songs (on the Mac)
 ```
 pip3 install mutagen librosa essentia        # essentia is optional but gives sharper tempo

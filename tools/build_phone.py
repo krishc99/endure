@@ -36,6 +36,13 @@ P = P[:a] + """<section class="card">
     <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
   </div>
   <div style="margin-top:10px"><button class="p" id="go">▶ Start</button></div>
+  <div id="bgbox" style="display:none;margin-top:12px;border-top:1px solid var(--bd);padding-top:10px">
+    <div class="lbl">Background mode · app closed, screen off</div>
+    <div class="small">Plays through the YouTube Music app (needs Premium) and keeps reading your pace from phone motion (or the step counter) with the screen locked. Songs switch with a short volume dip instead of a crossfade.</div>
+    <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="bgstart" class="p">Start in background</button><button id="bgstop" style="display:none">Stop background</button><button id="bgsetup">Set up</button></div>
+    <div class="small" id="bgneeds" style="margin-top:6px"></div>
+    <div class="small" id="bgstatus" style="margin-top:4px"></div>
+  </div>
 </section>
 <section class="card"><div class="lbl">Library</div>
   <div class="small" id="libstatus" style="margin:4px 0">Loading…</div>

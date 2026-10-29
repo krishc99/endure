@@ -54,6 +54,17 @@ itself, and the first songs start playing within about a minute while the rest a
   is unofficial and may break if Apple changes it;
 - tempo analysis uses [Essentia.js](https://mtg.github.io/essentia.js/) (AGPL-3.0).
 
+### 1d. Background mode (app closed, screen locked) — Android
+*Cadence → Background mode*. A native service keeps reading your pace (phone motion, or the step counter) with the screen
+off and has the **YouTube Music app** play the songs (background play there needs YouTube Premium): it opens the chosen
+song in YouTube Music, then jumps to the entry point (first chorus when the tempo goes up) with Android's media controls.
+Same rules as the app: tempo matching, hold a fitting song until its last chorus, swap at a section boundary when your
+pace changes. One player, so a switch is a short volume dip instead of a crossfade.
+Set-up (the *Set up* button walks through it): Physical activity + notifications, **Notification access** for Run DJ (to
+control YouTube Music), **Display over other apps** (Android only lets an app start a song in another app from the
+background with it), and ideally battery use *Unrestricted*. Experimental: how YouTube Music reacts can vary by version.
+Code: `plugins/rundj-background` (a local Capacitor plugin, built into the APK automatically).
+
 ## 2. Build the app (pick one)
 **A. Cloud build, no Android Studio:** push this folder to a GitHub repo → *Actions* → "Build Android debug APK" →
 open the run → download `run-dj-debug-apk` → unzip → open `app-debug.apk` on the phone (allow "install unknown apps").

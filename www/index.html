@@ -45,6 +45,13 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
     <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
   </div>
   <div style="margin-top:10px"><button class="p" id="go">▶ Start</button></div>
+  <div id="bgbox" style="display:none;margin-top:12px;border-top:1px solid var(--bd);padding-top:10px">
+    <div class="lbl">Background mode · app closed, screen off</div>
+    <div class="small">Plays through the YouTube Music app (needs Premium) and keeps reading your pace from phone motion (or the step counter) with the screen locked. Songs switch with a short volume dip instead of a crossfade.</div>
+    <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="bgstart" class="p">Start in background</button><button id="bgstop" style="display:none">Stop background</button><button id="bgsetup">Set up</button></div>
+    <div class="small" id="bgneeds" style="margin-top:6px"></div>
+    <div class="small" id="bgstatus" style="margin-top:4px"></div>
+  </div>
 </section>
 <section class="card"><div class="lbl">Library</div>
   <div class="small" id="libstatus" style="margin:4px 0">Loading…</div>
@@ -803,6 +810,53 @@ $('tapsave').onclick=async()=>{
   cur.bpm=tapBpm;cur.src='edited';cur.alts=[];ver++;taps=[];$('tapsave').style.display='none';
   say('tapv','Saved.');await post('/api/bpm',{id:cur.id,bpm:cur.bpm});render();
 };
+// ---- background mode (Android): a native service reads your pace and drives the YouTube Music app
+const BG=native&&native.Background;let bgOn=false,bgState=null;
+async function bgRefresh(){
+  if(!BG){return}
+  let s;try{s=await BG.status()}catch(e){return}      // plugin missing in this build
+  $('bgbox').style.display='block';bgState=s;bgOn=!!s.running;
+  const need=[];
+  if(!s.youtubeMusic)need.push('install the YouTube Music app');
+  if(!s.activity)need.push('allow Physical activity');
+  if(!s.notifications)need.push('allow notifications');
+  if(!s.notificationAccess)need.push('turn on Notification access for Run DJ (lets it control YouTube Music)');
+  if(!s.overlay)need.push('allow "Display over other apps" (lets songs change while the screen is locked)');
+  say('bgneeds',need.length?'To do: '+need.join(' · ')+'. Tap Set up.':'Ready. Tip: set Run DJ\'s battery use to "Unrestricted" so Android doesn\'t stop it.');
+  $('bgstart').style.display=bgOn?'none':'inline-block';$('bgstop').style.display=bgOn?'inline-block':'none';
+  $('go').disabled=bgOn;
+}
+async function bgSetup(){
+  const s=bgState||await BG.status();
+  if(!s.activity||!s.notifications){await BG.askPermissions();return bgRefresh()}
+  if(!s.notificationAccess){say('bgneeds','Find Run DJ in the list, switch it on, then come back here.');return BG.openNotificationAccess()}
+  if(!s.overlay){say('bgneeds','Switch on "Allow display over other apps" for Run DJ, then come back.');return BG.openOverlaySettings()}
+  say('bgneeds','Optional: find Run DJ under "All apps" and choose "Don\'t optimize" / Unrestricted.');return BG.openBatterySettings();
+}
+async function bgStart(){
+  await bgRefresh();
+  const s=bgState;
+  if(!s.youtubeMusic||!s.notificationAccess||!s.activity){say('bgstatus','Finish the set-up first (tap Set up).');return}
+  const list=songs.filter(x=>x.yt&&x.bpm&&!x.bad).map(x=>({yt:x.yt,title:x.title,artist:x.artist,dur:x.dur,bpm:x.bpm,energy:x.energy,alts:x.alts||[],bars:x.bars||null,first_bar:x.first_bar==null?null:x.first_bar,src:x.src}));
+  if(!list.length){say('bgstatus','No YouTube Music songs in "Play from". Add a playlist first.');return}
+  const st=S();
+  if(timer)$('go').click();                       // the in-app player stops: YouTube Music plays from now on
+  try{
+    await BG.start({library:JSON.stringify({songs:list,settings:{...st,minStd:+$('mmin').value||0.5,source:src==='ped'?'ped':'motion',dip:true}})});
+    log(`🌙 background mode: ${list.length} songs through YouTube Music, pace from ${src==='ped'?'the step counter':'phone motion'}. You can close the app now.`);
+  }catch(e){say('bgstatus','Could not start: '+(e.message||e))}
+  bgRefresh();
+}
+if(BG){
+  BG.addListener('state',o=>{
+    if(o.logLine){log('🌙 '+o.logLine);return}
+    if(o.running===false){say('bgstatus','Background mode stopped.');bgRefresh();return}
+    say('bgstatus',`${o.cadence<0?'reading pace…':Math.round(o.cadence)+' steps/min'} · ${o.song||'—'}${o.status?' · '+o.status:''}`);
+    if(!bgOn)bgRefresh();
+  });
+  $('bgstart').onclick=bgStart;$('bgstop').onclick=async()=>{await BG.stop();setTimeout(bgRefresh,500)};$('bgsetup').onclick=bgSetup;
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)bgRefresh()});
+}
 async function initApp(){
   loadSettings();loadPlaylists();renderPlaylists();try{const p=localStorage.getItem('rundj_pool');if(p)$('pool').value=p}catch(e){}render();
   await loadLibrary();
@@ -810,6 +864,7 @@ async function initApp(){
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
   if(want==='hc')await hcCheck();
   setSrc(SRCS.includes(want)?want:'manual');
+  bgRefresh();
 }
 
 initApp();

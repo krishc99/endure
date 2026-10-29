@@ -1,0 +1,8 @@
+{
+  "name": "rundj-background",
+  "version": "0.1.0",
+  "description": "Run DJ background mode: cadence from the accelerometer in a foreground service, playback through the YouTube Music app",
+  "private": true,
+  "capacitor": { "android": { "src": "android" } },
+  "files": ["android/src/main/", "android/build.gradle"]
+}

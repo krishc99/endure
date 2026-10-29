@@ -26,6 +26,12 @@ python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --ou
   if you pass `--bpm-key`. iTunes allows ~20 lookups a minute, so a first run of a big playlist takes several minutes.
   Install `essentia` (`pip3 install essentia`) for much better tempo on ballads and swing; each preview is measured by up
   to four estimators and songs where they disagree (including triplet 2/3 – 3/2 confusions) are marked **check**.
+- Song sections come from YouTube Music's **timed lyrics**: repeated lines mark the choruses. A song plays to the end of
+  its last chorus before rotating at a steady cadence, and the next one comes in at its first chorus. Music videos are
+  switched to their audio version (no intro or skits; `--keep-videos` to turn that off). Energy is ranked from each
+  preview's loudness, onset rate and brightness within the playlist, like the local analysis.
+- **Hold a song while it still fits** (Settings, on by default): at a steady cadence the song isn't swapped for a
+  slightly better match; it only changes after its last chorus, or sooner if your cadence moves out of its range.
 - Fix any song by ear on the phone: while it plays, tap **Tap the beat** 8+ times and **Save**.
 - `bpm_report.csv` lists every song's source, the version it matched and both measurements. Songs where they disagree are
   marked **check** in the report and in the app's song list: listen, then fix with ½ / ×2 or add `{"videoId": 165}` to

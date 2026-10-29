@@ -85,6 +85,14 @@ def load(path, default):
 
 
 # ------------------------------------------------------------ BPM sources
+def rank01(vals):
+    n = len(vals)
+    out = [0.5] * n
+    for pos, i in enumerate(sorted(range(n), key=lambda i: vals[i])):
+        out[i] = pos / (n - 1) if n > 1 else 0.5
+    return out
+
+
 def local_index():
     """(title, first artist) → cache entry from dj_live.py's analysis of your local files."""
     idx = {}
@@ -233,7 +241,7 @@ def itunes_get(params):
 
 def itunes_bpm(vid, title, artist, dur, is_video, cache, use_preview):
     """Finds the same version on Apple Music/iTunes and measures its 30 s preview. Cached per video."""
-    ck = f"it2|{vid}"
+    ck = f"it3|{vid}"
     if ck in cache:
         return cache[ck]
     if not use_preview:
@@ -256,7 +264,7 @@ def itunes_bpm(vid, title, artist, dur, is_video, cache, use_preview):
             if not m:
                 return dict(bpm=None, why="iTunes preview couldn't be measured")
             bpm = m["bpm"]
-            out = dict(bpm=bpm, alts=[], src="itunes-preview", match=why, dz_bpm=None, pv_bpm=bpm, ests=m["ests"],
+            out = dict(bpm=bpm, alts=[], src="itunes-preview", match=why, dz_bpm=None, pv_bpm=bpm, ests=m["ests"], feats=m["feats"],
                        flag=f"{m['agree']} of {m['n']} estimators agree ({m['ests']})")
             if m["n"] >= 3 and m["agree"] < 3 or m["n"] == 2 and m["agree"] < 2:
                 out.update(src="check", flag=f"estimators disagree ({m['ests']}): listen and fix")
@@ -408,6 +416,9 @@ def preview_measure(url, suffix=".mp3"):
             finally:
                 if os.path.exists(wav):
                     os.unlink(wav)
+        feats = dict(loud=float(20 * np.log10(librosa.feature.rms(y=y).mean() + 1e-9)),
+                     rate=len(librosa.onset.onset_detect(y=y, sr=sr)) / (len(y) / sr),
+                     bright=float(librosa.feature.spectral_centroid(y=y, sr=sr).mean()))
         t, steady = librosa_tempo(y, sr, librosa, np)
         ests.append(("librosa", t))
         yp = librosa.effects.percussive(y)
@@ -423,7 +434,7 @@ def preview_measure(url, suffix=".mp3"):
         octave = len({round(e[1] / rep[1]) for e in g if related(rep[1], e[1]) != "same"}) > 0
         # an estimate at 2/3 or 3/2 of the pick is the classic triplet / swing confusion: worth a listen
         alt = next((e for e in ests if e not in g and any(abs(e[1] / rep[1] - r) / r < 0.04 for r in (2 / 3, 1.5, 4 / 3, 0.75))), None)
-        return dict(bpm=rep[1], steady=round(steady, 2), agree=len(g), n=len(ests), octave=octave, alt=alt,
+        return dict(bpm=rep[1], steady=round(steady, 2), agree=len(g), n=len(ests), octave=octave, alt=alt, feats=feats,
                     ests=", ".join(f"{n} {b:.0f}" for n, b in ests))
     except Exception:
         return None
@@ -483,6 +494,129 @@ def deezer_bpm(vid, title, artist, dur, is_video, cache, use_preview):
     return out
 
 
+# ------------------------------------------------------------ song structure from YouTube Music's timed lyrics
+# Without the audio we can't analyse sections, but YouTube Music has time-stamped lyrics for most songs. Lines that
+# come back again and again are the chorus, and the gaps between lyric blocks are the section boundaries. From that,
+# plus the BPM, we build the same per-bar data dj_live.py makes from audio: [time, exit score, phrase start, energy].
+# The engine then leaves a song after its LAST chorus, brings the next one in at its FIRST chorus, and keeps
+# swaps on section boundaries.
+def secs(length):
+    try:
+        p = [int(x) for x in str(length).split(":")]
+        return float(sum(v * 60 ** i for i, v in enumerate(reversed(p))))
+    except Exception:
+        return 0.0
+
+
+def watch_info(yt, vid, cache):
+    """videoType, length, the audio-only counterpart and the lyrics id for a video. Cached."""
+    ck = f"wt1|{vid}"
+    if ck in cache:
+        return cache[ck]
+    try:
+        w = yt.get_watch_playlist(videoId=vid, limit=1)
+        t = (w.get("tracks") or [{}])[0]
+        cp = t.get("counterpart") or {}
+        out = dict(type=t.get("videoType") or "", length=secs(t.get("length")), lyrics=w.get("lyrics"),
+                   cp_id=cp.get("videoId"), cp_type=cp.get("videoType") or "", cp_length=secs(cp.get("length")))
+    except Exception as e:
+        return dict(type="", length=0, lyrics=None, cp_id=None, cp_type="", cp_length=0, err=str(e))
+    cache[ck] = out
+    return out
+
+
+_lyrics_warned = [False]
+
+
+def timed_lyrics(yt, browse_id, cache):
+    """[[start_s, end_s, text], ...] or None (no lyrics, or no timestamps for this song). Cached."""
+    if not browse_id:
+        return None
+    ck = f"ly1|{browse_id}"
+    if ck in cache:
+        return cache[ck]
+    try:
+        r = yt.get_lyrics(browse_id, timestamps=True)
+    except TypeError:
+        if not _lyrics_warned[0]:
+            print("    (your ytmusicapi is too old for timed lyrics: pip3 install -U ytmusicapi)")
+            _lyrics_warned[0] = True
+        return None
+    except Exception:
+        r = None
+    out = None
+    if r and r.get("hasTimestamps"):
+        out = []
+        for ln in r.get("lyrics") or []:
+            g = (lambda k: getattr(ln, k, None) if not isinstance(ln, dict) else ln.get(k))
+            if g("text") is not None and g("start_time") is not None:
+                out.append([g("start_time") / 1000, (g("end_time") or g("start_time")) / 1000, g("text")])
+    cache[ck] = out
+    return out
+
+
+def structure_from_lyrics(lines, bpm, dur):
+    """Per-bar structure, or None if the lyrics don't show a repeating chorus."""
+    from collections import Counter
+    key = lambda t: re.sub(r"[^a-z0-9 ]+", "", unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode().lower()).strip()
+    L = [(a, b, key(t)) for a, b, t in lines if key(t) and key(t) not in ("", "music", "instrumental")]
+    if len(L) < 8 or not bpm or not dur:
+        return None
+    bar = 240.0 / bpm
+    while bar < 1.6:            # a fast reading (e.g. 170) gives 1.4 s bars: phrases are still ~2-3 s
+        bar *= 2
+    cnt = Counter(k for _, _, k in L)
+    rep = [cnt[k] >= 2 and len(k.split()) >= 2 for _, _, k in L]
+    # chorus = a run of >= 3 repeated lines (one stray line allowed) lasting >= 2 bars
+    runs, i = [], 0
+    while i < len(L):
+        if not rep[i]:
+            i += 1
+            continue
+        j, miss = i, 0
+        while j + 1 < len(L) and L[j + 1][0] - L[j][1] < 2 * bar and (rep[j + 1] or (miss == 0 and j + 2 < len(L) and rep[j + 2])):
+            miss += 0 if rep[j + 1] else 1
+            j += 1
+        if j - i + 1 >= 3 and L[j][1] - L[i][0] >= 2 * bar:
+            runs.append([L[i][0] - 0.25 * bar, L[j][1]])
+        i = j + 1
+    if not runs:
+        return None
+    # snap chorus ends up to the bar grid, anchored on the first chorus (choruses start on a downbeat)
+    anchor = runs[0][0]
+    k0 = -int(anchor // bar)
+    grid = [anchor + k * bar for k in range(k0, int((dur - anchor) // bar) + 1) if 0 <= anchor + k * bar < dur - 0.5]
+    if len(grid) < 16:
+        return None
+    first_line, last_line = L[0][0], L[-1][1]
+    starts = {round(L[i][0], 2) for i in range(len(L)) if i == 0 or L[i][0] - L[i - 1][1] > 1.5 * bar}  # new lyric blocks
+    in_ch = lambda t: any(a - 0.1 <= t < b for a, b in runs)
+    sung = lambda a, b: any(x < b and y > a for x, y, _ in L)
+    bars = []
+    for n, t in enumerate(grid):
+        k = round((t - anchor) / bar)
+        if in_ch(t):
+            e = 0.9
+        elif t + bar <= first_line:
+            e = 0.35                                    # intro
+        elif t >= last_line + bar:
+            e = 0.3                                     # outro
+        elif not sung(t, t + 2 * bar):
+            e = 0.55                                    # instrumental break
+        else:
+            e = 0.6                                     # verse / bridge
+        ex = 0.0
+        if n and in_ch(grid[n - 1]) and not in_ch(t):
+            ex = 1.0                                    # the bar right after a chorus ends
+        elif any(t - 0.5 * bar <= s0 < t + 0.5 * bar for s0 in starts):
+            ex = 0.6                                    # a new lyric block starts here
+        ph = 1 if k % 8 == 0 else 0
+        bars.append([round(t, 2), round(min(1.0, ex + 0.25 * ph), 2), ph, e])
+    wave = [int(100 * (bars[min(len(bars) - 1, max(0, int(i / 240 * dur / bar)))][3])) for i in range(240)]
+    return dict(bars=bars, wave=wave, first_bar=bars[0][0], choruses=len(runs),
+                last_chorus_end=round(runs[-1][1], 1))
+
+
 # ------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -494,6 +628,9 @@ def main():
     ap.add_argument("--no-deezer", action="store_true", help="don't look songs up on Deezer")
     ap.add_argument("--no-preview", action="store_true", help="don't measure Deezer's 30 s previews with librosa")
     ap.add_argument("--recheck", action="store_true", help="ignore cached Deezer/GetSongBPM results")
+    ap.add_argument("--keep-videos", action="store_true",
+                    help="play music videos as listed (default: switch to the song's audio version, which has no "
+                         "video intro/skits and lines up with the lyrics timing)")
     args = ap.parse_args()
 
     try:
@@ -555,6 +692,13 @@ def main():
                 blocked.append(f"{title} — {artist} (embedding disabled, no playable alternative found)")
                 continue
 
+        # Prefer the audio-only version of a music video: no intro or skits, and the lyric timings match it
+        wi = watch_info(yt, play_id, bpmcache)
+        vtype = wi.get("type") or str(t.get("videoType") or "")
+        if not args.keep_videos and "ATV" not in vtype and wi.get("cp_id") and "ATV" in wi.get("cp_type", "")                 and (args.no_embed_check or embeddable(wi["cp_id"]) is not False):
+            play_id, vtype = wi["cp_id"], wi["cp_type"]
+            dur = wi.get("cp_length") or dur
+            wi = watch_info(yt, play_id, bpmcache)
         entry = dict(file=f"yt:{play_id}", yt=play_id, yt_orig=vid, title=title, artist=artist, dur=dur,
                      bpm=None, src=None, alts=[], energy=0.5, bars=None, wave=None, first_bar=None)
         ov = overrides.get(vid, overrides.get(play_id))
@@ -574,10 +718,10 @@ def main():
             rep.update(source="your local file", matched=f"{loc.get('title')} — {loc.get('artist')}")
         dzr = None
         if ov is None and not loc:
-            is_video = "OMV" in str(t.get("videoType") or "") or "UGC" in str(t.get("videoType") or "")
+            is_video = "OMV" in vtype or "UGC" in vtype
             dzr = deezer_bpm(play_id, title, artist, dur, is_video, bpmcache, not args.no_preview) if use_dz else dict(bpm=None)
             if not dzr.get("bpm"):
-                itr = itunes_bpm(play_id, title, artist, dur, is_video, bpmcache, not args.no_preview)
+                itr = itunes_bpm(vid, title, artist, dur, is_video, bpmcache, not args.no_preview)
                 if itr.get("bpm") or not use_dz:
                     dzr = dict(itr, why=itr.get("why") or dzr.get("why"))
             if dzr.get("bpm") and args.bpm_key and not dzr.get("dz_bpm"):
@@ -592,7 +736,7 @@ def main():
                         dzr = dict(dzr, src="check", flag=f"preview {dzr['bpm']:.0f} vs GetSongBPM {g['bpm']:.0f} "
                                    f"({dzr.get('ests', '')}): listen and fix")
             if dzr.get("bpm"):
-                entry.update(bpm=dzr["bpm"], src=dzr["src"], alts=dzr.get("alts") or [])
+                entry.update(bpm=dzr["bpm"], src=dzr["src"], alts=dzr.get("alts") or [], _feats=dzr.get("feats"))
                 rep.update(source="Deezer" if dzr["src"] in ("deezer", "deezer-preview") or dzr.get("dz_bpm") else "iTunes preview", flag=dzr.get("flag", ""), matched=dzr.get("match", ""),
                            deezer_bpm=dzr.get("dz_bpm") or "", preview_bpm=dzr.get("pv_bpm") or "")
             print(f"    {'%.0f BPM' % dzr['bpm'] if dzr.get('bpm') else 'no BPM'} · {dzr.get('flag') or dzr.get('why', '')}")
@@ -611,6 +755,17 @@ def main():
             # Beat/section data only lines up when it's the same recording (same length, no video intro)
             if loc.get("bars") and dur and abs(float(loc.get("dur") or 0) - dur) <= 2:
                 entry.update(bars=loc["bars"], wave=loc.get("wave"), first_bar=loc["bars"][0][0])
+        # Sections from timed lyrics (only when the lyrics belong to exactly this recording)
+        rep["sections"] = ""
+        if entry["bpm"] and not entry["bars"]:
+            lines = timed_lyrics(yt, wi.get("lyrics"), bpmcache) if ("ATV" in vtype or not vtype) else None
+            st = structure_from_lyrics(lines, entry["bpm"], dur) if lines else None
+            if st:
+                entry.update(bars=st["bars"], wave=st["wave"], first_bar=st["first_bar"])
+                rep["sections"] = f"{st['choruses']} choruses, last ends {int(st['last_chorus_end'] // 60)}:{int(st['last_chorus_end'] % 60):02d}"
+            else:
+                rep["sections"] = ("no timed lyrics" if not lines else "no repeating chorus in the lyrics")                     if ("ATV" in vtype or not vtype) else "music video: lyrics timing may not match"
+            print(f"    sections: {rep['sections']}")
         rep["bpm"] = entry["bpm"] or ""
         if entry["bpm"] is None:
             rep["flag"] = (dzr or {}).get("why", "no BPM found")
@@ -621,6 +776,15 @@ def main():
         BPM_CACHE.write_text(json.dumps(bpmcache, indent=1))      # save as we go: a long run can be resumed
 
     BPM_CACHE.write_text(json.dumps(bpmcache, indent=1))
+    # Energy = average percentile rank of loudness, onset rate and brightness of each preview within this playlist
+    # (same recipe as dj_live.py uses for local files). Overrides and local-file energies are kept.
+    fs = [s for s in songs if s.get("_feats")]
+    if len(fs) > 1:
+        rk = {f: rank01([s["_feats"][f] for s in fs]) for f in ("loud", "rate", "bright")}
+        for j, s in enumerate(fs):
+            s["energy"] = round(sum(rk[f][j] for f in rk) / 3, 2)
+    for s in songs:
+        s.pop("_feats", None)
     Path(args.out).write_text(json.dumps({"version": 1, "source": "youtube", "playlist": pl.get("title", pid),
                                           "playlistId": pid, "songs": songs}))
     by = {}
@@ -639,8 +803,9 @@ def main():
         print(f"\n{len(chk)} to listen to (marked 'check' in the app's song list):")
         for r in chk:
             print(f"  - {r['video']}  {r['title']} — {r['artist']}: {r['flag']}")
-    print(f"{sum(1 for s in songs if s['bars'])} have beat/section data from your local analysis "
-          "(smarter swap points); the rest swap at the min-play time or ~3/4 through when rotating.")
+    nb = sum(1 for s in songs if s["bars"])
+    print(f"{nb} of {len(songs)} have section data (from timed lyrics or your local files): they play to the end of "
+          "their last chorus and enter at their first chorus. The rest swap ~3/4 through.")
     if blocked:
         print(f"\nLeft out, can't play embedded ({len(blocked)}):")
         for b in blocked:

@@ -40,6 +40,20 @@ python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --ou
 - Private playlists or Liked Music (`LM`): run `ytmusicapi browser` once, then add `--auth browser.json`. Keep that file private.
 - Changed the playlist? Rerun and import the new file; it replaces that playlist's songs and keeps your ½ / ×2 / energy edits.
 
+### 1c. Or add playlists right in the app (no Mac needed)
+Paste a **YouTube Music**, **Spotify** or **Apple Music** playlist link into *Library → Add*. The phone does the whole analysis
+itself, and the first songs start playing within about a minute while the rest are analysed:
+- each song is matched to its YouTube Music audio version (that's what plays); BPM is measured from Apple's 30 s iTunes
+  preview of the same version with Essentia; chorus sections come from LRCLIB's timed lyrics; energy is ranked from the
+  preview's loudness, onset rate and brightness;
+- Apple allows ~20 lookups a minute, so a 100-song playlist takes about 5–6 minutes; songs already in your library are reused;
+- add as many playlists as you like: they all live in one library (*Play from* can pick one), and the whole library is saved
+  to `Documents/RunDJ/rundj_library.json` on the phone (restored automatically after a reinstall). *Refresh* re-syncs a playlist;
+- **Spotify** needs a free client ID and secret (developer.spotify.com → Create app), pasted in Settings. Only public playlists
+  made by users can be read; Spotify-made mixes are blocked for new apps. **Apple Music** reads the public playlist page, which
+  is unofficial and may break if Apple changes it;
+- tempo analysis uses [Essentia.js](https://mtg.github.io/essentia.js/) (AGPL-3.0).
+
 ## 2. Build the app (pick one)
 **A. Cloud build, no Android Studio:** push this folder to a GitHub repo → *Actions* → "Build Android debug APK" →
 open the run → download `run-dj-debug-apk` → unzip → open `app-debug.apk` on the phone (allow "install unknown apps").

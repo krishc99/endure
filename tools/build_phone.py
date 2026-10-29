@@ -39,7 +39,11 @@ P = P[:a] + """<section class="card">
 </section>
 <section class="card"><div class="lbl">Library</div>
   <div class="small" id="libstatus" style="margin:4px 0">Loading…</div>
-  <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button><button id="clearlib">Clear</button></div>
+  <div class="row" style="flex-wrap:nowrap"><input id="plink" type="url" placeholder="Paste a YouTube Music, Spotify or Apple Music playlist link" style="flex:1;min-width:0"><button id="padd" class="p">Add</button></div>
+  <label class="small" style="display:flex;gap:6px;align-items:center;margin:6px 0"><input type="checkbox" id="autostart" checked> Start playing as soon as the first songs are ready</label>
+  <div class="small" id="pstatus"></div>
+  <div id="plists" style="margin:8px 0"></div>
+  <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button><button id="savelib">Save library file</button><button id="clearlib">Clear</button></div>
   <input type="file" id="file" multiple accept=".json,application/json,audio/*" style="display:none">
   <div class="small" id="impmsg" style="margin-top:6px"></div></section>
 """ + P[b:]
@@ -49,7 +53,10 @@ rep('<label>Max wait for good exit (s)<input type="number" id="wait" value="20">
   <label>Treat data as stopped after (s)<input type="number" id="hcstale" value="240"></label>
   <label>Health Connect poll (s)<input type="number" id="hcpoll" value="10"></label>
   <label>Motion sensitivity (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
-  <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>''')
+  <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>
+  <label>iTunes store country<input type="text" id="country" value="IN" maxlength="2"></label>
+  <label>Spotify client ID<input type="text" id="spid" placeholder="for Spotify links"></label>
+  <label>Spotify client secret<input type="password" id="spsec"></label>''')
 rep('<script>\nconst $=', '<script src="bridge.js"></script>\n<script>\nconst $=')
 # --- audio comes from blobs stored on the phone; cadence from the chosen source
 rep("n.src='/song/'+x.s.id;", "n.src=srcFor(x.s);", 2)
@@ -61,6 +68,8 @@ rep("setInterval(draw,100);\nfetch('/api/songs').then(r=>r.json()).then(d=>{song
 rep("plan=null;disarm();$('go').textContent='▶ Start';", "plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';")
 rep("$('go').textContent='⏹ Stop';log('— started —');", "$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');")
 rep("t.energy=Math.min(1,Math.max(0,+v||0));", "t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;")
+rep("button,input[type=number]{", "button,input[type=number],input[type=text],input[type=url],input[type=password]{")
+rep(".set input[type=number]{width:100%}", ".set input[type=number],.set input[type=text],.set input[type=password]{width:100%}")
 # --- YouTube Music songs: both decks can play an embedded YouTube player as well as local audio (see ytdeck.js)
 rep("const AU=[new Audio(),new Audio()];", (HERE / "ytdeck.js").read_text() + "const AU=[new Deck(0),new Deck(1)];")
 rep("</style>", """#ytbox{display:none;position:relative;width:100%;aspect-ratio:16/9;margin-top:10px;border-radius:8px;overflow:hidden;background:#000}

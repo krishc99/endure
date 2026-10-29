@@ -92,6 +92,8 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
   <label class="ck"><input type="checkbox" id="hold" checked> Hold a song while it still fits</label>
+  <label class="ck"><input type="checkbox" id="push" checked> When every song at your pace has played, nudge the tempo up</label>
+  <label>Nudge up by at most (BPM)<input type="number" id="pushmax" value="8"></label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
   <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
@@ -214,8 +216,8 @@ class Deck{
   }
 }
 const AU=[new Deck(0),new Deck(1)];
-let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,recent=[];
-const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,xf:+$('xf').value,
+let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,played=new Map(),playSeq=0,cadHist=[],pushSong=null,pushBase=0,nudgeLog=null;
+const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:$('push').checked,pushMax:+$('pushmax').value,xf:+$('xf').value,
   ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
@@ -237,6 +239,31 @@ function match(s,c){
   }
   return r;
 }
+// Nudge: songs NOT yet played that are a little faster than your pace (just above the tolerance, up to +pushMax).
+function nudgeCandidates(c,excl){
+  const st=S(),out=[];
+  for(const s of songs){
+    if(s===excl||s.bad||lastPlayed(s)>=0)continue;
+    const ks=[{b:s.bpm,pen:0}];if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)ks.push({b:a.bpm,pen:1});
+    let best=null;
+    for(const k of ks)for(const [mult,pen,mode] of (st.half?[[1,0,'1:1'],[2,st.htpen,'half-time']]:[[1,0,'1:1']])){
+      const e=k.b*mult,up=e-c;
+      if(up>st.tol&&up<=st.tol+st.pushMax){const m={cost:up+k.pen+pen-st.ew*s.energy,diff:up,tempo:k.b,mode:mode+', tempo nudge',push:true};if(!best||m.cost<best.cost)best=m}
+    }
+    if(best)out.push({s,m:best});
+  }
+  if(!out.length)return null;
+  const lo=Math.min(...out.map(x=>x.m.diff)),near=out.filter(x=>x.m.diff<=lo+1.5);   // the smallest step up
+  return near.reduce((a,b)=>b.m.cost<a.m.cost?b:a);
+}
+// Your pace over the last minute: steady (range within 5) and not drifting down
+function paceTrend(){
+  const now=performance.now(),w=cadHist.filter(x=>now-x[0]<=60000);
+  if(w.length<20)return {steady:false,slowing:false};
+  const v=w.map(x=>x[1]),first=v.slice(0,15),last=v.slice(-15),avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
+  const slowing=avg(last)-avg(first)<-1.5;
+  return {steady:Math.max(...v)-Math.min(...v)<=5&&!slowing,slowing};
+}
 const bestMatch=c=>{let r=null;for(const s of songs){const m=match(s,c);if(m&&(!r||m.cost<r.m.cost))r={s,m}}return r};
 const desc=m=>`${m.mode}, off by ${m.diff.toFixed(0)}`;
 
@@ -252,12 +279,17 @@ function highRuns(s){   // stretches of ≥3 bars with energy ≥0.75: the choru
 }
 const dirOf=x=>{const r=eff(x.m)/curEff;return r>1.03?'up':r<.97?'down':'same'};
 
-// ---- choosing the next song: every song that fits is a candidate; pick at random among the near-best, skipping recent ones
+// ---- choosing the next song: every song that fits your pace is a candidate. Songs not yet played this run come first,
+// then the one played longest ago, so you hear every fitting song before any repeats. Among equals: the near-best match.
 const candidates=(c,excl)=>{const r=[];for(const s of songs){if(s===excl)continue;const m=match(s,c);if(m)r.push({s,m})}return r};
 const bestOf=a=>a.reduce((x,y)=>!x||y.m.cost<x.m.cost?y:x,null);
-function shuffle(pool){
-  const skip=new Set(recent.slice(-Math.min(4,Math.max(0,pool.length-1)))),fresh=pool.filter(x=>!skip.has(x.s.id));
-  const from=fresh.length?fresh:pool;return from[Math.floor(rng()*from.length)];
+const songKey=s=>s.file||s.yt||s.id;
+const lastPlayed=s=>played.has(songKey(s))?played.get(songKey(s)):-1;
+function choose(cands){
+  if(!cands||!cands.length)return null;
+  const oldest=Math.min(...cands.map(x=>lastPlayed(x.s))),fresh=cands.filter(x=>lastPlayed(x.s)===oldest);
+  const b=bestOf(fresh),near=fresh.filter(x=>x.m.cost<=b.m.cost+S().spread);
+  return near[Math.floor(rng()*near.length)];
 }
 
 // ---- where in the NEW song does the fade-in land on the exit point?
@@ -325,7 +357,7 @@ function crossfade(x,entry){
   e.delay>0?setTimeout(go,e.delay*1000):go();
   clearInterval(fadeT);fading=false;
   if(xf>0){fadeNew=n;fadeOld=old;fadeLen=xf;fadeStart=performance.now();fading=true;fadeT=setInterval(fadeStep,40)}else old.pause();
-  cur=x.s;recent.push(x.s.id);if(recent.length>30)recent.shift();curEff=eff(x.m);
+  cur=x.s;played.set(songKey(x.s),++playSeq);curEff=eff(x.m);if(x.m.push){pushSong=x.s;pushBase=cadence()}else pushSong=null;
   pend=null;keep=null;boundary=null;plan=null;disarm();base=e.startPos;lastEl=e.startPos;lastKey='';
 }
 function disarm(){clearInterval(armT);armT=null}
@@ -339,28 +371,37 @@ const dirTxt={same:'same tempo',up:'tempo up',down:'tempo down'};
 
 function loop(){
   const b=cadence(),st=S();
+  cadHist.push([performance.now(),b]);while(cadHist.length&&performance.now()-cadHist[0][0]>90000)cadHist.shift();
   if(!cur){
     const cs=candidates(b,null),bc=bestOf(cs);
-    if(bc){const x=shuffle(cs.filter(y=>y.m.cost<=bc.m.cost+st.spread));log(`▶ start: ${name(x.s)} (${desc(x.m)})`);crossfade(x)}
+    if(bc){const x=choose(cs);log(`▶ start: ${name(x.s)} (${desc(x.m)})`);crossfade(x)}
     else logOnce('hole',`⏹ silence: nothing fits ${b} BPM`);
     return render();
   }
   const a=AU[ai],el=a.currentTime,len=a.duration||cur.dur||1e9;
   if(fading){lastEl=el;return render()}   // never start a second fade on top of a running one
-  const mc=match(cur,b),ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
+  const tr=paceTrend();
+  let mc=match(cur,b);
+  // a nudged (faster) song stays "fitting" while you adapt to it, unless you slow down
+  if(!mc&&cur===pushSong&&!tr.slowing&&b>=pushBase-2){const e=pushSong.bpm;mc={cost:Math.abs(e-b),diff:Math.abs(e-b),tempo:e,mode:'tempo nudge'}}
+  const ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
   // hold: while the playing song still fits your cadence, don't jump to a 'slightly better' one; it plays to its last chorus
   const needSwap=bc&&(!ok||(!st.hold&&bc.m.cost+st.mar<=mc.cost));
   let pool=null,rot=false;
-  if(needSwap)pool=cs.filter(x=>x.m.cost<=bc.m.cost+st.spread);                       // clearly better / current no longer fits
-  else if(st.rotate&&ok&&bc){pool=cs.filter(x=>x.m.cost<=mc.cost+st.spread);rot=true} // steady tempo: rotate to another fitting song
+  if(needSwap)pool=cs;                                  // current no longer fits (or, with Hold off, another fits clearly better)
+  else if(st.rotate&&ok&&bc){pool=cs;rot=true}          // steady tempo: after the last chorus, on to another fitting song
+  // every song at this pace has played and you're running steadily: the next one is a little faster instead of a repeat
+  if(!needSwap&&st.rotate&&ok&&st.push&&tr.steady&&cs.every(x=>lastPlayed(x.s)>=0)){
+    const nu=nudgeCandidates(b,cur);
+    if(nu){pool=[nu];rot=true;if(nudgeLog!==songKey(nu.s)){nudgeLog=songKey(nu.s);log(`⏫ every song at ${Math.round(b)} has played: next is a little faster, ${name(nu.s)} (${Math.round(nu.m.tempo*(nu.m.mode.startsWith('half')?2:1))})`)}}
+  }
   if(pool&&pool.length){
-    if(!(keep&&keep.cur===cur&&keep.rot===rot&&pool.some(x=>x.s===keep.s)))keep={cur,rot,s:shuffle(pool).s};   // pick once, stay stable
+    if(!(keep&&keep.cur===cur&&keep.rot===rot&&pool.some(x=>x.s===keep.s)))keep={cur,rot,s:choose(pool).s};   // pick once, stay stable
     pend=pool.find(x=>x.s===keep.s);pend.rot=rot;
   }else{pend=null;keep=null}
   if(a.ended||el>=len-st.xf-0.5){   // song is about to end anyway: fade so it finishes with the file
     let nx=pend;plan=null;disarm();
-    if(!nx){const all=ok?[{s:cur,m:mc},...cs]:cs,ba=bestOf(all);
-      if(ba){const near=all.filter(x=>x.m.cost<=ba.m.cost+st.spread),oth=near.filter(x=>x.s!==cur);nx=shuffle(oth.length?oth:near)}}
+    if(!nx)nx=choose(cs)||(ok?{s:cur,m:mc}:null);         // repeat the same song only if nothing else fits
     if(nx){const dir=dirOf(nx),en=pickEntry(nx.s,cur.bars&&cur.bars.length?lv(barAt(cur,el)):.5,dir,st.xf);
       log(`⏭ song ending → ${name(nx.s)} (${desc(nx.m)}, ${dirTxt[dir]}), enters at ${en.why}`);crossfade(nx,en)}
     else{log(`⏹ song ended, nothing fits ${b} BPM`);a.pause();cur=null}
@@ -414,9 +455,9 @@ async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||
 $('go').onclick=()=>{
   if(timer){clearInterval(timer);timer=null;AU.forEach(a=>a.pause());cur=null;plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';return render()}
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
-  $('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
+  played=new Map();playSeq=0;cadHist=[];pushSong=null;$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 // Cadence (steps/min) straight from the phone's accelerometer: no step counting, no sync lag.
 // Orientation-independent (uses the magnitude of acceleration), then finds the repeat period of the motion by
@@ -773,7 +814,7 @@ async function hcTest(){
 }
 
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','half','alt'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 

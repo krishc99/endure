@@ -59,7 +59,8 @@ itself, and the first songs start playing within about a minute while the rest a
 off and has the **YouTube Music app** play the songs (background play there needs YouTube Premium): it opens the chosen
 song in YouTube Music, then jumps to the entry point (first chorus when the tempo goes up) with Android's media controls.
 Same rules as the app: tempo matching, hold a fitting song until its last chorus, swap at a section boundary when your
-pace changes. One player, so a switch is a short volume dip instead of a crossfade.
+pace changes. No repeats: songs not yet played this run come first (then the one played longest ago); when every
+song at a steady pace has played, the next one is a little faster (up to +8 BPM, *Settings*) instead of a repeat. One player, so a switch is a short volume dip instead of a crossfade.
 Set-up (the *Set up* button walks through it): Physical activity + notifications, **Notification access** for Run DJ (to
 control YouTube Music), **Display over other apps** (Android only lets an app start a song in another app from the
 background with it), and ideally battery use *Unrestricted*. Experimental: how YouTube Music reacts can vary by version.

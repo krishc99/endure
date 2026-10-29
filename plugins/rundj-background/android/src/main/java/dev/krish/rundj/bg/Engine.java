@@ -1,6 +1,7 @@
 package dev.krish.rundj.bg;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Random;
 
@@ -23,10 +24,11 @@ public class Engine {
 
     public static class Settings {
         public double tol = 6, min = 30, mar = 3, spread = 4, ew = 3, htpen = 4, conf = 0.5, wait = 20, lead = 1.2;
-        public boolean half = true, alt = true, hold = true, rotate = true;
+        public boolean half = true, alt = true, hold = true, rotate = true, push = true;
+        public double pushMax = 8;
     }
 
-    public static class Match { public double cost, diff, tempo, eff; public String mode; Song s; }
+    public static class Match { public double cost, diff, tempo, eff; public String mode; Song s; boolean push; }
 
     public static class Action {
         public Song song; public double entry; public String why;
@@ -38,7 +40,10 @@ public class Engine {
     public final List<Song> songs;
     public final Settings st;
     final Random rng = new Random();
-    final List<String> recent = new ArrayList<>();
+    final HashMap<String, Integer> played = new HashMap<>();   // song → when it last started (this run)
+    int playSeq = 0;
+    final java.util.ArrayDeque<Double> cadHist = new java.util.ArrayDeque<>();   // one reading per tick (~1 s)
+    Song pushSong; double pushBase;
     public Song cur;
     double curEff = 0, entryPos = 0;
     Plan plan;
@@ -75,13 +80,56 @@ public class Engine {
 
     static Match bestOf(List<Match> a) { Match b = null; for (Match m : a) if (b == null || m.cost < b.cost) b = m; return b; }
 
-    Match shuffle(List<Match> pool) {
-        int keep = Math.min(4, Math.max(0, pool.size() - 1));
-        List<String> skip = recent.subList(Math.max(0, recent.size() - keep), recent.size());
+    int lastPlayed(Song s) { Integer v = played.get(s.yt); return v == null ? -1 : v; }
+
+    /** Songs not yet played this run first, then the one played longest ago; among those, a near-best match. */
+    Match choose(List<Match> cands) {
+        if (cands == null || cands.isEmpty()) return null;
+        int oldest = Integer.MAX_VALUE;
+        for (Match m : cands) oldest = Math.min(oldest, lastPlayed(m.s));
         List<Match> fresh = new ArrayList<>();
-        for (Match m : pool) if (!skip.contains(m.s.yt)) fresh.add(m);
-        List<Match> from = fresh.isEmpty() ? pool : fresh;
-        return from.get(rng.nextInt(from.size()));
+        for (Match m : cands) if (lastPlayed(m.s) == oldest) fresh.add(m);
+        Match b = bestOf(fresh);
+        List<Match> near = new ArrayList<>();
+        for (Match m : fresh) if (m.cost <= b.cost + st.spread) near.add(m);
+        return near.get(rng.nextInt(near.size()));
+    }
+
+    /** Not-yet-played songs a little faster than c (just above the tolerance, up to +pushMax): the smallest step up. */
+    Match nudge(double c, Song excl) {
+        List<Match> out = new ArrayList<>();
+        for (Song s : songs) {
+            if (s == excl || s.bad || lastPlayed(s) >= 0) continue;
+            Match best = null;
+            List<double[]> ks = new ArrayList<>(); ks.add(new double[]{s.bpm, 0});
+            if (st.alt) for (int i = 0; i < s.alts.length; i++) if (s.altConf[i] >= st.conf) ks.add(new double[]{s.alts[i], 1});
+            double[][] modes = st.half ? new double[][]{{1, 0}, {2, st.htpen}} : new double[][]{{1, 0}};
+            for (double[] k : ks) for (double[] m : modes) {
+                double e = k[0] * m[0], up = e - c;
+                if (up > st.tol && up <= st.tol + st.pushMax) {
+                    double cost = up + k[1] + m[1] - st.ew * s.energy;
+                    if (best == null || cost < best.cost) { best = new Match(); best.cost = cost; best.diff = up; best.tempo = k[0]; best.eff = e; best.s = s; best.push = true; best.mode = (m[0] == 2 ? "half-time" : "1:1") + ", tempo nudge"; }
+                }
+            }
+            if (best != null) out.add(best);
+        }
+        if (out.isEmpty()) return null;
+        double lo = Double.MAX_VALUE; for (Match m : out) lo = Math.min(lo, m.diff);
+        Match pick = null; for (Match m : out) if (m.diff <= lo + 1.5 && (pick == null || m.cost < pick.cost)) pick = m;
+        return pick;
+    }
+
+    /** {steady, slowing} over the last minute of readings. */
+    boolean[] trend() {
+        Double[] v = cadHist.toArray(new Double[0]);
+        int n = Math.min(v.length, 60);
+        if (n < 20) return new boolean[]{false, false};
+        double mn = 1e9, mx = -1e9, a = 0, b = 0;
+        for (int i = v.length - n; i < v.length; i++) { mn = Math.min(mn, v[i]); mx = Math.max(mx, v[i]); }
+        for (int i = v.length - n; i < v.length - n + 15; i++) a += v[i];
+        for (int i = v.length - 15; i < v.length; i++) b += v[i];
+        boolean slowing = b / 15 - a / 15 < -1.5;
+        return new boolean[]{mx - mn <= 5 && !slowing, slowing};
     }
 
     // ---------------------------------------------------------------- structure
@@ -182,48 +230,49 @@ public class Engine {
             List<Match> cs = candidates(c, null);
             Match b = bestOf(cs);
             if (b == null) { status = "Nothing fits " + Math.round(c) + " steps/min"; return null; }
-            List<Match> pool = new ArrayList<>();
-            for (Match m : cs) if (m.cost <= b.cost + st.spread) pool.add(m);
-            return begin(shuffle(pool), 0, 0, "start");
+            return begin(choose(cs), 0, 0, "start");
         }
         if (c < 40) { plan = null; status = c < 0 ? "Reading your pace…" : "Standing: keeping the song"; return null; }
+        cadHist.addLast(c); while (cadHist.size() > 90) cadHist.pollFirst();
+        boolean[] tr = trend();
         Match mc = match(cur, c);
+        if (mc == null && cur == pushSong && !tr[1] && c >= pushBase - 2) {     // a nudged song fits while you adapt
+            mc = new Match(); mc.s = cur; mc.eff = curEff; mc.tempo = cur.bpm; mc.diff = Math.abs(curEff - c); mc.cost = mc.diff; mc.mode = "tempo nudge";
+        }
         boolean ok = mc != null;
         List<Match> cs = candidates(c, cur);
         Match best = bestOf(cs);
         boolean needSwap = best != null && (!ok || (!st.hold && best.cost + st.mar <= mc.cost));
         List<Match> pool = null; boolean rot = false;
-        if (needSwap) { pool = new ArrayList<>(); for (Match m : cs) if (m.cost <= best.cost + st.spread) pool.add(m); }
-        else if (st.rotate && ok && best != null) { pool = new ArrayList<>(); for (Match m : cs) if (m.cost <= mc.cost + st.spread) pool.add(m); rot = true; }
+        if (needSwap) pool = cs;                                         // pace changed: any song that fits
+        else if (st.rotate && ok && best != null) { pool = cs; rot = true; } // steady pace: after the last chorus
+        boolean allPlayed = true; for (Match m : cs) if (lastPlayed(m.s) < 0) allPlayed = false;
+        if (!needSwap && st.rotate && ok && st.push && tr[0] && allPlayed) {  // nothing new at this pace: a little faster
+            Match nu = nudge(c, cur);
+            if (nu != null) { pool = new ArrayList<>(); pool.add(nu); rot = true; }
+        }
         if (pool == null || pool.isEmpty()) plan = null;
         else {
             boolean stillIn = false;
             if (plan != null) for (Match m : pool) if (m.s == plan.target) stillIn = true;
             if (plan == null || plan.rot != rot || !stillIn) {
-                Match x = shuffle(pool);
+                Match x = choose(pool);
                 plan = new Plan(); plan.target = x.s; plan.rot = rot; plan.T = pickExit(pos, dirOf(x), rot);
             }
         }
         double dur = cur.dur;
         if (ended || (dur > 0 && pos >= dur - 1.5)) {
             Match nx = null;
-            if (plan != null) nx = match(plan.target, c);
-            if (nx == null) {
-                List<Match> all = new ArrayList<>(cs);
-                if (ok) all.add(mc);
-                Match ba = bestOf(all);
-                if (ba != null) {
-                    List<Match> near = new ArrayList<>(), oth = new ArrayList<>();
-                    for (Match m : all) if (m.cost <= ba.cost + st.spread) { near.add(m); if (m.s != cur) oth.add(m); }
-                    nx = shuffle(oth.isEmpty() ? near : oth);
-                }
-            }
+            if (plan != null) { nx = match(plan.target, c); if (nx == null) nx = nudgeMatch(plan.target, c); }
+            if (nx == null) nx = choose(cs);
+            if (nx == null && ok) nx = mc;                                  // repeat only if nothing else fits
             if (nx == null) { status = "Song ended; nothing fits " + Math.round(c) + " steps/min"; cur = null; return null; }
             return next(nx, pos, "song ended");
         }
         if (plan != null && pos >= plan.T - st.lead) {
             Match x = match(plan.target, c);
-            if (x != null) return next(x, pos, plan.rot ? "after its last chorus" : "your pace changed");
+            if (x == null) x = nudgeMatch(plan.target, c);
+            if (x != null) return next(x, pos, x.push ? "every song at your pace has played: a little faster" : plan.rot ? "after its last chorus" : "your pace changed");
             plan = null;
         }
         status = (ok ? "" : "Pace " + Math.round(c) + " is outside this song's range. ")
@@ -239,9 +288,12 @@ public class Engine {
         return begin(x, e[0], (int) e[1], reason + " · " + dir + " tempo · enters at " + whyTxt[(int) e[1]]);
     }
 
+    Match nudgeMatch(Song s, double c) { Match n = nudge(c, cur); return n != null && n.s == s ? n : null; }
+
     private Action begin(Match x, double entry, int why, String reason) {
         cur = x.s; curEff = x.eff; entryPos = entry; plan = null;
-        recent.add(x.s.yt); if (recent.size() > 30) recent.remove(0);
+        if (x.push) { pushSong = x.s; pushBase = cadHist.isEmpty() ? 0 : cadHist.peekLast(); } else pushSong = null;
+        played.put(x.s.yt, ++playSeq);
         status = "Playing " + x.s.title;
         return new Action(x.s, entry, reason + " (" + x.mode + ", off by " + Math.round(x.diff) + ")");
     }

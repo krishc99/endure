@@ -67,7 +67,7 @@ rep('<label>Max wait for good exit (s)<input type="number" id="wait" value="20">
 rep('<script>\nconst $=', '<script src="bridge.js"></script>\n<script>\nconst $=')
 # --- audio comes from blobs stored on the phone; cadence from the chosen source
 rep("n.src='/song/'+x.s.id;", "n.src=srcFor(x.s);", 2)
-rep("+$('bpm').value", "cadence()", 2)
+rep("+$('bpm').value", "cadence()", 3)
 rep("$('bpmv').textContent=b;", "$('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':'steps / BPM · manual';")
 rep("const post=(p,o)=>fetch(p,{method:'POST',body:JSON.stringify(o)});", "")
 rep("setInterval(draw,100);\nfetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});",

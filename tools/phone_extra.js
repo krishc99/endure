@@ -4,7 +4,7 @@ const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAw
 let src='manual',hcCad=null,hcOk=false,hcTimer=null,motionCad=null,pedCad=null;
 
 // ---- storage: songs live in IndexedDB so they survive app restarts
-let db=null,blobs={},urls={};
+let db=null,blobs={},urls={},allSongs=[];
 const idb=()=>db?Promise.resolve(db):new Promise((res,rej)=>{const r=indexedDB.open('rundj',1);
   r.onupgradeneeded=()=>{r.result.createObjectStore('meta',{keyPath:'file'});r.result.createObjectStore('blob')};
   r.onsuccess=()=>res(db=r.result);r.onerror=()=>rej(r.error)});
@@ -12,27 +12,37 @@ const tx=(name,mode,fn)=>idb().then(d=>new Promise((res,rej)=>{
   const t=d.transaction(name,mode);let out;
   t.oncomplete=()=>res(out&&typeof out==='object'&&'result' in out?out.result:out);t.onerror=t.onabort=()=>rej(t.error);
   out=fn(t.objectStore(name))}));
-const srcFor=s=>urls[s.file]||(urls[s.file]=URL.createObjectURL(blobs[s.file]));
-const saveMeta=s=>{const {id,_hr,...m}=s;return tx('meta','readwrite',st=>st.put(m))};
+const srcFor=s=>s.yt?'yt:'+s.yt:urls[s.file]||(urls[s.file]=URL.createObjectURL(blobs[s.file]));
+const saveMeta=s=>{const {id,_hr,bad,...m}=s;return tx('meta','readwrite',st=>st.put(m))};
 const post=(p,o)=>saveMeta(songs[o.id]);                      // ½ / ×2 / energy edits persist on the phone
 const say=(id,t)=>{$(id).textContent=t};
 
 async function loadLibrary(){
   const metas=await tx('meta','readonly',s=>s.getAll()),keys=await tx('blob','readonly',s=>s.getAllKeys()),vals=await tx('blob','readonly',s=>s.getAll());
   blobs={};keys.forEach((k,i)=>blobs[k]=vals[i]);
-  songs=metas.filter(m=>blobs[m.file]).sort((a,b)=>a.file.localeCompare(b.file)).map((m,i)=>({...m,id:i}));
+  allSongs=metas.filter(m=>m.yt||blobs[m.file]);
+  const pool=$('pool').value,nYt=allSongs.filter(m=>m.yt).length;
+  songs=allSongs.filter(m=>pool==='all'||(pool==='yt')===!!m.yt)
+    .sort((a,b)=>(a.title||a.file).localeCompare(b.title||b.file)).map((m,i)=>({...m,id:i}));
   say('count',`${songs.length} songs`);
-  say('libstatus',songs.length?`${songs.length} songs ready.`:'No songs yet. Tap Import and select library.json plus your audio files together.');
+  say('libstatus',allSongs.length?`${allSongs.length} songs: ${allSongs.length-nYt} local, ${nYt} from YouTube Music. Playing from ${songs.length}.`
+    :'No songs yet. Tap Import and select library.json plus your audio files together, or a yt_library.json on its own.');
   ver++;render();
 }
 async function importFiles(files){
   const isJ=f=>/\.json$/i.test(f.name),audio=new Map(files.filter(f=>!isJ(f)).map(f=>[f.name,f]));let metas=[],bad=[];
-  for(const j of files.filter(isJ)){try{const d=JSON.parse(await j.text());metas=metas.concat(Array.isArray(d)?d:(d.songs||[]))}catch(e){bad.push(j.name)}}
-  const have=new Set(songs.map(s=>s.file)),fileOf=new Set(metas.map(m=>m.file));
-  let added=0;const noAudio=[];let noMeta=0;
-  await tx('meta','readwrite',s=>{for(const m of metas){if(audio.has(m.file)||have.has(m.file)){s.put(m);added++}else noAudio.push(m.file)}});
+  for(const j of files.filter(isJ)){try{const d=JSON.parse(await j.text()),ms=Array.isArray(d)?d:(d.songs||[]);if(d.playlistId)ms.forEach(m=>{if(m.yt)m.pl=d.playlistId});metas=metas.concat(ms)}catch(e){bad.push(j.name)}}
+  const old=new Map(allSongs.map(s=>[s.file,s])),have=new Set(old.keys()),fileOf=new Set(metas.map(m=>m.file));
+  // A YouTube playlist file replaces that playlist's earlier import (songs you removed go away), keeping your ½ / ×2 / energy edits
+  const pls=new Set(metas.filter(m=>m.yt&&m.pl).map(m=>m.pl));
+  let added=0,nyt=0;const noAudio=[];let noMeta=0;
+  await tx('meta','readwrite',s=>{
+    for(const o of allSongs)if(o.yt&&pls.has(o.pl)&&!fileOf.has(o.file))s.delete(o.file);
+    for(const m of metas){
+      if(m.yt){const o=old.get(m.file);if(o&&o.src==='edited')Object.assign(m,{bpm:o.bpm,src:'edited',alts:[]});if(o&&o.eEdit)Object.assign(m,{energy:o.energy,eEdit:1});s.put(m);added++;nyt++}
+      else if(audio.has(m.file)||have.has(m.file)){s.put(m);added++}else noAudio.push(m.file)}});
   await tx('blob','readwrite',s=>{for(const [n,f] of audio){if(fileOf.has(n)||have.has(n))s.put(f,n);else noMeta++}});
-  say('impmsg',`Imported ${added} songs.`+(noAudio.length?` ${noAudio.length} library entries had no matching audio file (e.g. ${noAudio[0]}).`:'')
+  say('impmsg',`Imported ${added} songs${nyt?` (${nyt} from YouTube Music)`:''}.`+(noAudio.length?` ${noAudio.length} library entries had no matching audio file (e.g. ${noAudio[0]}).`:'')
     +(noMeta?` ${noMeta} audio files had no analysis in library.json and were skipped.`:'')+(bad.length?` Could not read: ${bad.join(', ')}.`:''));
   await loadLibrary();
 }
@@ -160,11 +170,36 @@ function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_setti
 
 SRCS.forEach(k=>$('src_'+k).onclick=()=>setSrc(k));
 $('hcconnect').onclick=hcConnect;$('hctest').onclick=hcTest;
-$('imp').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
+$('imp').onclick=()=>$('file').click();
+$('pool').onchange=()=>{try{localStorage.setItem('rundj_pool',$('pool').value)}catch(e){};loadLibrary()};
+// A YouTube song that can't play (removed, embedding off, no network): skip it for this session and move on
+AU.forEach(d=>d.onerror=(deck,vid,code,why)=>{
+  const s=songs.find(x=>x.yt===vid);if(s){s.bad=true;ver++}
+  log(`⚠ YouTube can't play ${s?name(s):vid}: ${why}. Skipping it.`);
+  if(deck!==AU[ai]&&plan&&plan.x.s.yt===vid){plan=null;keep=null;pend=null;prepId=null;disarm()}
+  render();
+});$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
 $('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
 SAVED.forEach(id=>{$(id).addEventListener('change',saveSettings);$(id).addEventListener('input',saveSettings)});
+// ---- tap tempo: fix the playing song's BPM by ear. Saved on the phone and kept when you re-import the playlist.
+let taps=[],tapBpm=null;
+$('tap').onclick=()=>{
+  const now=performance.now();if(taps.length&&now-taps[taps.length-1]>2000)taps=[];
+  taps.push(now);if(taps.length>16)taps.shift();
+  if(taps.length<4){say('tapv',`keep tapping… (${taps.length})`);$('tapsave').style.display='none';return}
+  const d=taps.slice(1).map((t,i)=>t-taps[i]).sort((a,b)=>a-b),med=d[Math.floor(d.length/2)];
+  tapBpm=Math.round(600000/med)/10;
+  say('tapv',cur?`${tapBpm} BPM (${taps.length} taps) · now ${cur.bpm}`:`${tapBpm} BPM (${taps.length} taps)`);
+  $('tapsave').style.display=cur&&taps.length>=8?'inline-block':'none';
+};
+$('tapsave').onclick=async()=>{
+  if(!cur||!tapBpm)return;
+  log(`✎ ${name(cur)}: BPM ${cur.bpm} → ${tapBpm} (tapped)`);
+  cur.bpm=tapBpm;cur.src='edited';cur.alts=[];ver++;taps=[];$('tapsave').style.display='none';
+  say('tapv','Saved.');await post('/api/bpm',{id:cur.id,bpm:cur.bpm});render();
+};
 async function initApp(){
-  loadSettings();render();
+  loadSettings();try{const p=localStorage.getItem('rundj_pool');if(p)$('pool').value=p}catch(e){}render();
   await loadLibrary();
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
   if(want==='hc')await hcCheck();

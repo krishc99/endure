@@ -60,6 +60,25 @@ rep("setInterval(draw,100);\nfetch('/api/songs').then(r=>r.json()).then(d=>{song
     "setInterval(draw,100);\n" + (HERE / "motion.js").read_text() + (HERE / "phone_extra.js").read_text() + "\ninitApp();")
 rep("plan=null;disarm();$('go').textContent='▶ Start';", "plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';")
 rep("$('go').textContent='⏹ Stop';log('— started —');", "$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');")
+rep("t.energy=Math.min(1,Math.max(0,+v||0));", "t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;")
+# --- YouTube Music songs: both decks can play an embedded YouTube player as well as local audio (see ytdeck.js)
+rep("const AU=[new Audio(),new Audio()];", (HERE / "ytdeck.js").read_text() + "const AU=[new Deck(0),new Deck(1)];")
+rep("</style>", """#ytbox{display:none;position:relative;width:100%;aspect-ratio:16/9;margin-top:10px;border-radius:8px;overflow:hidden;background:#000}
+.ytdeck{position:absolute;inset:0}.ytdeck iframe{width:100%;height:100%;border:0}
+</style>""")
+rep('<div class="np" id="np">Press Start</div><div class="small" id="sub"></div>',
+    '<div class="np" id="np">Press Start</div><div class="small" id="sub"></div><div id="ytbox"></div>'
+    '<div class="row" style="margin-top:8px;justify-content:flex-start"><button id="tap">Tap the beat</button>'
+    '<span class="small" id="tapv">Wrong BPM? Tap along 8+ times, then save.</span><button id="tapsave" class="p" style="display:none">Save</button></div>')
+rep("function match(s,c){\n  const st=S();", "function match(s,c){\n  if(s.bad)return null;\n  const st=S();")
+rep("$('fill').style.width=", "$('ytbox').style.display=cur&&cur.yt?'block':'none';\n  $('fill').style.width=")
+rep('<div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button>',
+    """<label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">Play from
+    <select id="pool"><option value="all">All songs</option><option value="yt">YouTube Music only</option><option value="local">Local files only</option></select></label>
+  <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button>""")
+rep('<div class="small" id="impmsg" style="margin-top:6px"></div></section>',
+    '<div class="small" id="impmsg" style="margin-top:6px"></div>'
+    '<div class="small" style="margin-top:6px">BPM data from <a href="https://www.deezer.com" target="_blank" rel="noopener">Deezer</a>, Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a></div></section>')
 out = HERE.parent / "www" / "index.html"
 out.write_text(P)
 print(f"wrote {out} ({len(P)//1024} KB)")

@@ -30,6 +30,8 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
 .set{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px}.set label{display:grid;gap:3px;font-size:12px;color:var(--mut)}
 .set label.ck{grid-template-columns:auto 1fr;align-items:center;align-self:end}
 .seg button{flex:1}button:disabled,input:disabled{opacity:.5}
+#ytbox{display:none;position:relative;width:100%;aspect-ratio:16/9;margin-top:10px;border-radius:8px;overflow:hidden;background:#000}
+.ytdeck{position:absolute;inset:0}.ytdeck iframe{width:100%;height:100%;border:0}
 </style></head><body><main>
 <div><h1>🏃 Run DJ</h1><div class="small" id="count"></div></div>
 <section class="card">
@@ -46,11 +48,13 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
 </section>
 <section class="card"><div class="lbl">Library</div>
   <div class="small" id="libstatus" style="margin:4px 0">Loading…</div>
+  <label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">Play from
+    <select id="pool"><option value="all">All songs</option><option value="yt">YouTube Music only</option><option value="local">Local files only</option></select></label>
   <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button><button id="clearlib">Clear</button></div>
   <input type="file" id="file" multiple accept=".json,application/json,audio/*" style="display:none">
-  <div class="small" id="impmsg" style="margin-top:6px"></div></section>
+  <div class="small" id="impmsg" style="margin-top:6px"></div><div class="small" style="margin-top:6px">BPM data from <a href="https://www.deezer.com" target="_blank" rel="noopener">Deezer</a>, Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a></div></section>
 <section class="card">
-  <div class="lbl">Now playing</div><div class="np" id="np">Press Start</div><div class="small" id="sub"></div>
+  <div class="lbl">Now playing</div><div class="np" id="np">Press Start</div><div class="small" id="sub"></div><div id="ytbox"></div><div class="row" style="margin-top:8px;justify-content:flex-start"><button id="tap">Tap the beat</button><span class="small" id="tapv">Wrong BPM? Tap along 8+ times, then save.</span><button id="tapsave" class="p" style="display:none">Save</button></div>
   <div class="bar"><div class="fill" id="fill"></div><div class="mk" id="mkmin"></div><div class="mk b" id="mkb" style="display:none"></div></div>
   <div class="row"><span class="small" id="el"></span><span class="small">grey = min play time · amber = swap point</span></div>
   <div id="pend" style="margin-top:8px"></div>
@@ -83,7 +87,118 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
 <script>
 const $=id=>document.getElementById(id);
 const SILENT='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-const AU=[new Audio(),new Audio()];
+// ======================= YouTube decks =======================
+// A Deck looks like an <audio> element to the engine (src, currentTime, duration, ended, volume, play, pause,
+// 'loadedmetadata'), so the engine's crossfades, entry points and swaps work unchanged.
+// src 'yt:<videoId>' plays in an embedded YouTube player; anything else plays in a normal <audio>.
+let ytApi=null;
+const ytLoad=()=>ytApi||(ytApi=new Promise((res,rej)=>{
+  if(window.YT&&window.YT.Player)return res();
+  window.onYouTubeIframeAPIReady=()=>res();
+  const s=document.createElement('script');s.src='https://www.youtube.com/iframe_api';
+  s.onerror=()=>{ytApi=null;rej(new Error('could not load the YouTube player (offline?)'))};document.head.appendChild(s);
+}));
+const YT_ERR={2:'bad video id',5:'player error',100:'video removed or private',101:'embedding disabled by the owner',150:'embedding disabled by the owner',152:'player configuration error',153:'player configuration error'};
+let ytTop=1;
+class Deck{
+  constructor(n){
+    this.au=new Audio();this.n=n;this.mode='audio';this.vid=null;this.p=null;this.pReady=null;
+    this._vol=1;this._start=0;this._want=false;this._ended=false;this._state=-1;this._loaded=null;this._t=0;this._tAt=0;this._last=-1;
+    this.onerror=null;
+  }
+  _box(){   // both players share one 16:9 box; the one playing is on top
+    let el=document.getElementById('ytdeck'+this.n);
+    if(!el){el=document.createElement('div');el.id='ytdeck'+this.n;el.className='ytdeck';document.getElementById('ytbox').appendChild(el)}
+    return el;
+  }
+  _player(){
+    if(this.pReady)return this.pReady;
+    return this.pReady=ytLoad().then(()=>new Promise(res=>{
+      const holder=document.createElement('div');this._box().appendChild(holder);
+      this.p=new YT.Player(holder,{width:'100%',height:'100%',
+        playerVars:{playsinline:1,controls:0,disablekb:1,rel:0,fs:0,iv_load_policy:3,origin:location.origin},
+        events:{onReady:()=>res(this.p),onStateChange:e=>this._onState(e.data),onError:e=>this._onError(e.data)}});
+    })).catch(e=>{this.pReady=null;this._ended=true;log('⚠ '+e.message);throw e});
+  }
+  _onState(s){
+    this._state=s;
+    if(this.mode!=='yt')return;
+    if(s===1&&!this._want){                    // pre-buffering: got going, now park it at the entry point
+      this.p.pauseVideo();this.p.seekTo(this._start,true);
+    }else if(s===0)this._ended=true;
+  }
+  _onError(code){
+    if(this.mode!=='yt')return;
+    this._ended=true;this._want=false;
+    if(this.onerror)this.onerror(this,this.vid,code,YT_ERR[code]||('error '+code));
+  }
+  get src(){return this.mode==='yt'?'yt:'+this.vid:this.au.src}
+  set src(v){
+    if(typeof v==='string'&&v.startsWith('yt:')){
+      this.au.pause();this.mode='yt';this.vid=v.slice(3);this._start=0;this._t=0;this._tAt=performance.now();this._last=-1;
+      this._want=false;this._ended=false;
+      if(this.p&&this._loaded&&this._loaded!==this.vid)this.p.pauseVideo();
+    }else{
+      if(this.mode==='yt'){this._want=false;if(this.p)this.p.pauseVideo()}
+      this.mode='audio';this.au.src=v;
+    }
+  }
+  set preload(v){
+    this.au.preload=v;
+    if(this.mode==='yt'&&v==='auto')setTimeout(()=>this._prebuffer(),0);   // after the engine sets the entry point
+  }
+  get preload(){return this.au.preload}
+  async _prebuffer(){
+    if(this.mode!=='yt'||this._want)return;
+    const vid=this.vid;let p;try{p=await this._player()}catch(e){return}
+    if(this.mode!=='yt'||this._want||this.vid!==vid)return;
+    p.mute();this._loaded=vid;p.loadVideoById({videoId:vid,startSeconds:this._start});
+  }
+  addEventListener(ev,fn,opt){
+    if(this.mode==='yt'&&ev==='loadedmetadata')return fn();   // the engine only uses this to set the entry point
+    this.au.addEventListener(ev,fn,opt);
+  }
+  get currentTime(){
+    if(this.mode!=='yt')return this.au.currentTime;
+    if(!this.p||this._loaded!==this.vid||!this.p.getCurrentTime)return this._start;
+    const t=this.p.getCurrentTime()||0,now=performance.now();
+    if(t!==this._last){this._last=t;this._t=t;this._tAt=now}
+    return this._state===1?this._t+Math.min(1,(now-this._tAt)/1000):this._t;   // the player reports ~4×/s; fill the gaps
+  }
+  set currentTime(v){
+    if(this.mode!=='yt'){this.au.currentTime=v;return}
+    this._start=v;this._t=v;this._tAt=performance.now();
+    if(this.p&&this._loaded===this.vid)this.p.seekTo(v,true);
+  }
+  get duration(){
+    if(this.mode!=='yt')return this.au.duration;
+    return this.p&&this._loaded===this.vid&&this.p.getDuration?(this.p.getDuration()||0):0;
+  }
+  get ended(){return this.mode==='yt'?this._ended:this.au.ended}
+  get volume(){return this.mode==='yt'?this._vol:this.au.volume}
+  set volume(v){
+    this._vol=v;
+    if(this.mode!=='yt'){this.au.volume=v;return}
+    if(this.p&&this.p.setVolume)this.p.setVolume(Math.round(v*100));
+  }
+  play(){
+    if(this.mode!=='yt'){if(this.p)try{this.p.pauseVideo()}catch(e){};return this.au.play()}
+    this._want=true;this._ended=false;const vid=this.vid;
+    this._box().style.zIndex=++ytTop;document.getElementById('ytbox').style.display='block';
+    this._player().then(p=>{
+      if(!this._want||this.vid!==vid)return;
+      p.setVolume(Math.round(this._vol*100));p.unMute();
+      if(this._loaded===vid){if(Math.abs((p.getCurrentTime()||0)-this._start)>1.5&&this._state!==1)p.seekTo(this._start,true);p.playVideo()}
+      else{this._loaded=vid;p.loadVideoById({videoId:vid,startSeconds:this._start})}
+    }).catch(()=>{});
+    return Promise.resolve();
+  }
+  pause(){
+    this.au.pause();
+    if(this.mode==='yt'){this._want=false;if(this.p&&this.p.pauseVideo)this.p.pauseVideo()}
+  }
+}
+const AU=[new Deck(0),new Deck(1)];
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,recent=[];
 const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,xf:+$('xf').value,
   ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
@@ -95,6 +210,7 @@ const name=s=>s.artist?`${s.title} — ${s.artist}`:s.title;
 // How can this song fit cadence c? Tries 1:1 first; half-time (runner takes 2 steps per beat) costs a penalty.
 // cost = distance + penalties - energy bonus. null if nothing is within tolerance.
 function match(s,c){
+  if(s.bad)return null;
   const st=S();let r=null;
   const cands=[{b:s.bpm,pen:0,alt:false}];
   if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)cands.push({b:a.bpm,pen:1,alt:true});
@@ -261,6 +377,7 @@ function render(){
   const mc=cur&&match(cur,b);
   $('np').textContent=cur?name(cur):(timer?'Silence':'Press Start');
   $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range'):'';
+  $('ytbox').style.display=cur&&cur.yt?'block':'none';
   $('fill').style.width=len?Math.min(100,el/len*100)+'%':'0';
   $('mkmin').style.left=len?Math.min(100,(base+st.min)/len*100)+'%':'0';
   const mb=$('mkb');if(cur&&boundary&&len){mb.style.display='block';mb.style.left=Math.min(100,boundary/len*100)+'%'}else mb.style.display='none';
@@ -276,7 +393,7 @@ function render(){
 }
 
 async function adj(id,f){const t=songs[id];t.bpm=Math.round(t.bpm*f*10)/10;t.src='edited';t.alts=[];ver++;await post('/api/bpm',{id,bpm:t.bpm});render()}
-async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||0));ver++;await post('/api/energy',{id,energy:t.energy})}
+async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;ver++;await post('/api/energy',{id,energy:t.energy})}
 $('go').onclick=()=>{
   if(timer){clearInterval(timer);timer=null;AU.forEach(a=>a.pause());cur=null;plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';return render()}
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
@@ -368,7 +485,7 @@ const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAw
 let src='manual',hcCad=null,hcOk=false,hcTimer=null,motionCad=null,pedCad=null;
 
 // ---- storage: songs live in IndexedDB so they survive app restarts
-let db=null,blobs={},urls={};
+let db=null,blobs={},urls={},allSongs=[];
 const idb=()=>db?Promise.resolve(db):new Promise((res,rej)=>{const r=indexedDB.open('rundj',1);
   r.onupgradeneeded=()=>{r.result.createObjectStore('meta',{keyPath:'file'});r.result.createObjectStore('blob')};
   r.onsuccess=()=>res(db=r.result);r.onerror=()=>rej(r.error)});
@@ -376,27 +493,37 @@ const tx=(name,mode,fn)=>idb().then(d=>new Promise((res,rej)=>{
   const t=d.transaction(name,mode);let out;
   t.oncomplete=()=>res(out&&typeof out==='object'&&'result' in out?out.result:out);t.onerror=t.onabort=()=>rej(t.error);
   out=fn(t.objectStore(name))}));
-const srcFor=s=>urls[s.file]||(urls[s.file]=URL.createObjectURL(blobs[s.file]));
-const saveMeta=s=>{const {id,_hr,...m}=s;return tx('meta','readwrite',st=>st.put(m))};
+const srcFor=s=>s.yt?'yt:'+s.yt:urls[s.file]||(urls[s.file]=URL.createObjectURL(blobs[s.file]));
+const saveMeta=s=>{const {id,_hr,bad,...m}=s;return tx('meta','readwrite',st=>st.put(m))};
 const post=(p,o)=>saveMeta(songs[o.id]);                      // ½ / ×2 / energy edits persist on the phone
 const say=(id,t)=>{$(id).textContent=t};
 
 async function loadLibrary(){
   const metas=await tx('meta','readonly',s=>s.getAll()),keys=await tx('blob','readonly',s=>s.getAllKeys()),vals=await tx('blob','readonly',s=>s.getAll());
   blobs={};keys.forEach((k,i)=>blobs[k]=vals[i]);
-  songs=metas.filter(m=>blobs[m.file]).sort((a,b)=>a.file.localeCompare(b.file)).map((m,i)=>({...m,id:i}));
+  allSongs=metas.filter(m=>m.yt||blobs[m.file]);
+  const pool=$('pool').value,nYt=allSongs.filter(m=>m.yt).length;
+  songs=allSongs.filter(m=>pool==='all'||(pool==='yt')===!!m.yt)
+    .sort((a,b)=>(a.title||a.file).localeCompare(b.title||b.file)).map((m,i)=>({...m,id:i}));
   say('count',`${songs.length} songs`);
-  say('libstatus',songs.length?`${songs.length} songs ready.`:'No songs yet. Tap Import and select library.json plus your audio files together.');
+  say('libstatus',allSongs.length?`${allSongs.length} songs: ${allSongs.length-nYt} local, ${nYt} from YouTube Music. Playing from ${songs.length}.`
+    :'No songs yet. Tap Import and select library.json plus your audio files together, or a yt_library.json on its own.');
   ver++;render();
 }
 async function importFiles(files){
   const isJ=f=>/\.json$/i.test(f.name),audio=new Map(files.filter(f=>!isJ(f)).map(f=>[f.name,f]));let metas=[],bad=[];
-  for(const j of files.filter(isJ)){try{const d=JSON.parse(await j.text());metas=metas.concat(Array.isArray(d)?d:(d.songs||[]))}catch(e){bad.push(j.name)}}
-  const have=new Set(songs.map(s=>s.file)),fileOf=new Set(metas.map(m=>m.file));
-  let added=0;const noAudio=[];let noMeta=0;
-  await tx('meta','readwrite',s=>{for(const m of metas){if(audio.has(m.file)||have.has(m.file)){s.put(m);added++}else noAudio.push(m.file)}});
+  for(const j of files.filter(isJ)){try{const d=JSON.parse(await j.text()),ms=Array.isArray(d)?d:(d.songs||[]);if(d.playlistId)ms.forEach(m=>{if(m.yt)m.pl=d.playlistId});metas=metas.concat(ms)}catch(e){bad.push(j.name)}}
+  const old=new Map(allSongs.map(s=>[s.file,s])),have=new Set(old.keys()),fileOf=new Set(metas.map(m=>m.file));
+  // A YouTube playlist file replaces that playlist's earlier import (songs you removed go away), keeping your ½ / ×2 / energy edits
+  const pls=new Set(metas.filter(m=>m.yt&&m.pl).map(m=>m.pl));
+  let added=0,nyt=0;const noAudio=[];let noMeta=0;
+  await tx('meta','readwrite',s=>{
+    for(const o of allSongs)if(o.yt&&pls.has(o.pl)&&!fileOf.has(o.file))s.delete(o.file);
+    for(const m of metas){
+      if(m.yt){const o=old.get(m.file);if(o&&o.src==='edited')Object.assign(m,{bpm:o.bpm,src:'edited',alts:[]});if(o&&o.eEdit)Object.assign(m,{energy:o.energy,eEdit:1});s.put(m);added++;nyt++}
+      else if(audio.has(m.file)||have.has(m.file)){s.put(m);added++}else noAudio.push(m.file)}});
   await tx('blob','readwrite',s=>{for(const [n,f] of audio){if(fileOf.has(n)||have.has(n))s.put(f,n);else noMeta++}});
-  say('impmsg',`Imported ${added} songs.`+(noAudio.length?` ${noAudio.length} library entries had no matching audio file (e.g. ${noAudio[0]}).`:'')
+  say('impmsg',`Imported ${added} songs${nyt?` (${nyt} from YouTube Music)`:''}.`+(noAudio.length?` ${noAudio.length} library entries had no matching audio file (e.g. ${noAudio[0]}).`:'')
     +(noMeta?` ${noMeta} audio files had no analysis in library.json and were skipped.`:'')+(bad.length?` Could not read: ${bad.join(', ')}.`:''));
   await loadLibrary();
 }
@@ -524,11 +651,36 @@ function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_setti
 
 SRCS.forEach(k=>$('src_'+k).onclick=()=>setSrc(k));
 $('hcconnect').onclick=hcConnect;$('hctest').onclick=hcTest;
-$('imp').onclick=()=>$('file').click();$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
+$('imp').onclick=()=>$('file').click();
+$('pool').onchange=()=>{try{localStorage.setItem('rundj_pool',$('pool').value)}catch(e){};loadLibrary()};
+// A YouTube song that can't play (removed, embedding off, no network): skip it for this session and move on
+AU.forEach(d=>d.onerror=(deck,vid,code,why)=>{
+  const s=songs.find(x=>x.yt===vid);if(s){s.bad=true;ver++}
+  log(`⚠ YouTube can't play ${s?name(s):vid}: ${why}. Skipping it.`);
+  if(deck!==AU[ai]&&plan&&plan.x.s.yt===vid){plan=null;keep=null;pend=null;prepId=null;disarm()}
+  render();
+});$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
 $('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
 SAVED.forEach(id=>{$(id).addEventListener('change',saveSettings);$(id).addEventListener('input',saveSettings)});
+// ---- tap tempo: fix the playing song's BPM by ear. Saved on the phone and kept when you re-import the playlist.
+let taps=[],tapBpm=null;
+$('tap').onclick=()=>{
+  const now=performance.now();if(taps.length&&now-taps[taps.length-1]>2000)taps=[];
+  taps.push(now);if(taps.length>16)taps.shift();
+  if(taps.length<4){say('tapv',`keep tapping… (${taps.length})`);$('tapsave').style.display='none';return}
+  const d=taps.slice(1).map((t,i)=>t-taps[i]).sort((a,b)=>a-b),med=d[Math.floor(d.length/2)];
+  tapBpm=Math.round(600000/med)/10;
+  say('tapv',cur?`${tapBpm} BPM (${taps.length} taps) · now ${cur.bpm}`:`${tapBpm} BPM (${taps.length} taps)`);
+  $('tapsave').style.display=cur&&taps.length>=8?'inline-block':'none';
+};
+$('tapsave').onclick=async()=>{
+  if(!cur||!tapBpm)return;
+  log(`✎ ${name(cur)}: BPM ${cur.bpm} → ${tapBpm} (tapped)`);
+  cur.bpm=tapBpm;cur.src='edited';cur.alts=[];ver++;taps=[];$('tapsave').style.display='none';
+  say('tapv','Saved.');await post('/api/bpm',{id:cur.id,bpm:cur.bpm});render();
+};
 async function initApp(){
-  loadSettings();render();
+  loadSettings();try{const p=localStorage.getItem('rundj_pool');if(p)$('pool').value=p}catch(e){}render();
   await loadLibrary();
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();
   if(want==='hc')await hcCheck();

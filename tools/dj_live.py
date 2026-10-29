@@ -381,7 +381,6 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Energy weight (BPM)<input type="number" id="ew" value="3" step="0.5"></label>
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
-  <label class="ck"><input type="checkbox" id="hold" checked> Hold a song while it still fits</label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
   <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
@@ -393,7 +392,7 @@ const $=id=>document.getElementById(id);
 const SILENT='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const AU=[new Audio(),new Audio()];
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,recent=[];
-const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,xf:+$('xf').value,
+const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,xf:+$('xf').value,
   ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
@@ -524,8 +523,7 @@ function loop(){
   const a=AU[ai],el=a.currentTime,len=a.duration||cur.dur||1e9;
   if(fading){lastEl=el;return render()}   // never start a second fade on top of a running one
   const mc=match(cur,b),ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
-  // hold: while the playing song still fits your cadence, don't jump to a 'slightly better' one; it plays to its last chorus
-  const needSwap=bc&&(!ok||(!st.hold&&bc.m.cost+st.mar<=mc.cost));
+  const needSwap=bc&&(!ok||bc.m.cost+st.mar<=mc.cost);
   let pool=null,rot=false;
   if(needSwap)pool=cs.filter(x=>x.m.cost<=bc.m.cost+st.spread);                       // clearly better / current no longer fits
   else if(st.rotate&&ok&&bc){pool=cs.filter(x=>x.m.cost<=mc.cost+st.spread);rot=true} // steady tempo: rotate to another fitting song
@@ -591,7 +589,7 @@ $('go').onclick=()=>{
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
   $('go').textContent='⏹ Stop';log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 fetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});
 </script></body></html>

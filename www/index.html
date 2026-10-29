@@ -263,7 +263,8 @@ function pickEntry(s,Lo,dir,xf){
       const tg=Math.max(.2,Lo-.25),c=s.bars.filter(b=>b[2]===1&&b[0]<=.7*(s.dur||1e9));
       if(c.length){t=c.reduce((a,b)=>Math.abs(lv(b)-tg)<Math.abs(lv(a)-tg)-1e-9?b:a)[0];why='a calmer section'}
     }else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
-  }
+  }else if(dir!=='down'&&(s.dur||0)>90){   // no section data: skip the intro and first verse instead of starting cold
+    const bar=240/(s.bpm||120);t=Math.round(Math.min(45,.25*s.dur)/bar)*bar;why='about a quarter in (no section data)'}
   const sp=t-xf;return {tAlign:t,startPos:Math.max(0,sp),delay:Math.max(0,-sp),why};
 }
 // ---- where in the CURRENT song does the fade END?  The fade runs [T−xf, T].

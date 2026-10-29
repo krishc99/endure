@@ -123,11 +123,11 @@ async function ytmVisitor() {
   } catch (e) { visitor = ''; }
   return visitor;
 }
-async function ytm(endpoint, body) {
+async function ytm(endpoint, body, client) {
   const d = new Date(), ver = '1.' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0') + '.01.00';
   const vid = await ytmVisitor();
   const headers = { 'Content-Type': 'application/json', 'User-Agent': UA, Origin: 'https://music.youtube.com', 'X-Goog-Visitor-Id': vid };
-  const data = { context: { client: { clientName: 'WEB_REMIX', clientVersion: ver, hl: 'en' }, user: {} }, ...body };
+  const data = { context: { client: client || { clientName: 'WEB_REMIX', clientVersion: ver, hl: 'en' }, user: {} }, ...body };
   for (let attempt = 0; ; attempt++) {
     const r = await http('POST', `https://music.youtube.com/youtubei/v1/${endpoint}?alt=json&prettyPrint=false`, { headers, data });
     if (r.status < 400 && r.data && typeof r.data === 'object') return r.data;
@@ -357,12 +357,88 @@ export function structureFromLyrics(lines, bpm, dur) {
   return { bars, wave, first_bar: bars[0][0], choruses: runs.length, lastChorusEnd: runs[runs.length - 1][1] };
 }
 
+// ------------------------------------------------------------------ YouTube Music's own timed lyrics (as ytmusicapi does it)
+async function ytmTimedLyrics(videoId) {
+  const nx = await ytm('next', { videoId, enablePersistentPlaylistPanel: true, isAudioOnly: true, tunerSettingValue: 'AUTOMIX_SETTING_NORMAL' });
+  let bid = null;
+  for (const be of walk(nx, 'browseEndpoint')) {
+    const pt = be.browseEndpointContextSupportedConfigs && be.browseEndpointContextSupportedConfigs.browseEndpointContextMusicConfig &&
+      be.browseEndpointContextSupportedConfigs.browseEndpointContextMusicConfig.pageType;
+    if (pt === 'MUSIC_PAGE_TYPE_TRACK_LYRICS' && be.browseId) { bid = be.browseId; break; }
+  }
+  if (!bid) return null;
+  const r = await ytm('browse', { browseId: bid }, { clientName: 'ANDROID_MUSIC', clientVersion: '7.21.50', hl: 'en' });
+  for (const arr of walk(r, 'timedLyricsData')) {
+    if (!Array.isArray(arr) || !arr.length || !arr.every(x => x.cueRange)) continue;
+    return arr.map(x => [+x.cueRange.startTimeMilliseconds / 1000, +x.cueRange.endTimeMilliseconds / 1000, x.lyricLine || '']).filter(x => x[2].trim());
+  }
+  return null;
+}
+
+// ------------------------------------------------------------------ YouTube "Most replayed" heatmap → where the song peaks
+// Used when a song has no usable lyrics (instrumentals, remixes, rare songs): the most-replayed stretches are almost
+// always the chorus or the drop, which is exactly where a tempo-up swap should land.
+export function parseHeatmap(html) {
+  const out = [];
+  for (const m of String(html).matchAll(/\{[^{}]*"intensityScoreNormalized"\s*:\s*[\d.eE-]+[^{}]*\}/g)) {
+    const o = m[0], g = k => { const x = o.match(new RegExp('"' + k + '"\\s*:\\s*"?([\\d.eE-]+)')); return x ? +x[1] : null; };
+    const st = g('startMillis'), du = g('durationMillis'), it = g('intensityScoreNormalized');
+    if (st != null && du != null && it != null) out.push([st / 1000, du / 1000, it]);
+  }
+  if (!out.length) for (const m of String(html).matchAll(/\{[^{}]*"heatMarkerIntensityScoreNormalized"\s*:\s*[\d.eE-]+[^{}]*\}/g)) {
+    const o = m[0], g = k => { const x = o.match(new RegExp('"' + k + '"\\s*:\\s*"?([\\d.eE-]+)')); return x ? +x[1] : null; };
+    const st = g('timeRangeStartMillis'), du = g('markerDurationMillis'), it = g('heatMarkerIntensityScoreNormalized');
+    if (st != null && du != null && it != null) out.push([st / 1000, du / 1000, it]);
+  }
+  const seen = new Set();
+  return out.filter(x => !seen.has(x[0]) && seen.add(x[0])).sort((a, b) => a[0] - b[0]);
+}
+async function youtubeHeatmap(videoId) {
+  const r = await http('GET', 'https://www.youtube.com/watch?v=' + videoId + '&hl=en', { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, as: 'text' });
+  const h = r.status < 400 ? parseHeatmap(r.data) : [];
+  return h.length >= 20 ? h : null;
+}
+export function structureFromHeatmap(marks, bpm, dur) {
+  if (!marks || marks.length < 20 || !bpm || !dur || dur < 60) return null;
+  const at = t => { let v = marks[0][2]; for (const [s, d, i] of marks) { if (s <= t) v = i; else break; } return v; };
+  const vals = marks.filter(m => m[0] >= 15).map(m => m[2]), mx = Math.max(...vals), mn = Math.min(...vals);
+  if (!(mx - mn > 0.2)) return null;                       // flat heatmap: no clear peak
+  let bar = 240 / bpm; while (bar < 1.6) bar *= 2;
+  const bars = [];
+  for (let k = 0, t = 0; t < dur - 0.5; k++, t = k * bar) {
+    let n = (at(t + bar / 2) - mn) / (mx - mn);
+    if (t < 15) n = Math.min(n, 0.4);                        // everyone watches the start: not a peak
+    bars.push([Math.round(t * 100) / 100, 0, k % 8 === 0 ? 1 : 0, Math.round((0.3 + 0.65 * n) * 100) / 100]);
+  }
+  let peaks = 0;
+  bars.forEach((b, i) => {
+    const hi = x => x && x[3] >= 0.75;
+    if (hi(b) && !hi(bars[i - 1])) peaks++;
+    if (i && hi(bars[i - 1]) && !hi(b)) b[1] = 1; else b[1] = b[2] ? 0.25 : 0;
+  });
+  if (!peaks) return null;
+  const wave = Array.from({ length: 240 }, (_, i) => Math.round(100 * bars[Math.min(bars.length - 1, Math.floor(i / 240 * bars.length))][3]));
+  return { bars, wave, first_bar: 0, peaks };
+}
+
 // ------------------------------------------------------------------ YouTube embeddability
 async function embeddable(videoId) {
   try {
     const r = await http('GET', 'https://www.youtube.com/oembed?format=json&url=' + encodeURIComponent('https://www.youtube.com/watch?v=' + videoId));
     return r.status === 401 || r.status === 403 || r.status === 404 ? false : r.status < 400 ? true : null;
   } catch (e) { return null; }
+}
+
+async function addSections(meta, isAudio) {
+  const vid = meta.yt, dur = meta.dur, bpm = meta.bpm;
+  let lines = isAudio ? await ytmTimedLyrics(vid).catch(() => null) : null;
+  if (!lines) lines = await lrclib(meta.title, meta.artist, dur).catch(() => null);
+  const st = lines ? structureFromLyrics(lines, bpm, dur) : null;
+  if (st) return Object.assign(meta, { bars: st.bars, wave: st.wave, first_bar: st.first_bar, sections: `${st.choruses} choruses (lyrics)` });
+  const hm = await youtubeHeatmap(vid).catch(() => null), sh = hm ? structureFromHeatmap(hm, bpm, dur) : null;
+  if (sh) return Object.assign(meta, { bars: sh.bars, wave: sh.wave, first_bar: sh.first_bar, sections: `${sh.peaks} peaks (most replayed)` });
+  meta.sections = 'no section data: enters about a quarter in';
+  return meta;
 }
 
 // ------------------------------------------------------------------ the whole thing
@@ -386,7 +462,7 @@ export async function analyzePlaylist(link, opts, cb) {
       // 1. the YouTube audio version to play
       let vid = t.videoId || null, dur = t.dur || 0, type = t.type || '';
       const known = opts.known && (opts.known.get(vid) || opts.known.get(songKey(t.title, t.artist)));
-      if (known) { out.reused++; cb.song({ ...known }, plId); continue; }
+      if (known) { out.reused++; const k = { ...known }; if (!k.bars && k.yt && !k.sectionsTried) { await addSections(k, true); k.sectionsTried = 1; } cb.song(k, plId); continue; }
       if (t.available === false) { out.skipped.push([label, 'unavailable']); continue; }
       if (!vid || !/ATV/.test(type)) {
         const res = await ytmSearchSongs(`${t.title} ${t.artist.split(/,|&/)[0]}`).catch(() => []);
@@ -395,18 +471,15 @@ export async function analyzePlaylist(link, opts, cb) {
         else if (!vid) { out.skipped.push([label, 'not found on YouTube Music: ' + pv.why]); continue; }
         await sleep(300);
       }
-      if (opts.known && opts.known.get(vid)) { out.reused++; cb.song({ ...opts.known.get(vid) }, plId); continue; }
+      if (opts.known && opts.known.get(vid)) { out.reused++; const k = { ...opts.known.get(vid) }; if (!k.bars && !k.sectionsTried) { await addSections(k, true); k.sectionsTried = 1; } cb.song(k, plId); continue; }
       if (await embeddable(vid) === false) { out.skipped.push([label, "the owner doesn't allow it to play inside apps"]); continue; }
       // 2. BPM + energy features from the iTunes preview of the same version
       const b = await itunesBpm(t.title, t.artist, dur, /OMV|UGC/.test(type), country);
       if (!b.bpm) { out.skipped.push([label, b.why]); continue; }
       const meta = { file: 'yt:' + vid, yt: vid, title: t.title, artist: t.artist, dur, bpm: b.bpm, src: b.src, alts: b.alts, energy: 0.5,
         feats: b.feats, flag: b.flag, match: b.match, bars: null, wave: null, first_bar: null };
-      // 3. sections from timed lyrics of this exact recording
-      const lines = await lrclib(t.title, t.artist, dur).catch(() => null);
-      const st = lines ? structureFromLyrics(lines, b.bpm, dur) : null;
-      if (st) Object.assign(meta, { bars: st.bars, wave: st.wave, first_bar: st.first_bar, sections: `${st.choruses} choruses` });
-      else meta.sections = lines ? 'no repeating chorus in the lyrics' : 'no timed lyrics for this recording';
+      // 3. sections: YouTube Music's timed lyrics, else LRCLIB's, else the "Most replayed" heatmap
+      await addSections(meta, /ATV/.test(type));
       out.added++;
       cb.song(meta, plId);
     } catch (e) {
@@ -428,4 +501,4 @@ export function rankEnergy(metas) {
 
 export const songKey = (title, artist) => 't:' + norm(title) + '|' + firstArtist(artist);
 
-export const _test = { setHttp: f => { httpOverride = f; }, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };
+export const _test = { setHttp: f => { httpOverride = f; }, ytmTimedLyrics, youtubeHeatmap, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };

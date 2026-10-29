@@ -513,82 +513,19 @@ def watch_info(yt, vid, cache):
     ck = f"wt1|{vid}"
     if ck in cache:
         return cache[ck]
-    w, err = None, ""
-    for attempt in range(3):                  # YouTube sometimes refuses bursts of requests: back off and retry
-        try:
-            w = yt.get_watch_playlist(videoId=vid, limit=1)
-            break
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"[:160]
-            time.sleep(2 + 4 * attempt)
-    if w is None:
-        return dict(type="", length=0, lyrics=None, cp_id=None, cp_type="", cp_length=0, err=err)
     try:
+        w = yt.get_watch_playlist(videoId=vid, limit=1)
         t = (w.get("tracks") or [{}])[0]
         cp = t.get("counterpart") or {}
         out = dict(type=t.get("videoType") or "", length=secs(t.get("length")), lyrics=w.get("lyrics"),
                    cp_id=cp.get("videoId"), cp_type=cp.get("videoType") or "", cp_length=secs(cp.get("length")))
     except Exception as e:
-        return dict(type="", length=0, lyrics=None, cp_id=None, cp_type="", cp_length=0, err=f"{type(e).__name__}: {e}"[:160])
+        return dict(type="", length=0, lyrics=None, cp_id=None, cp_type="", cp_length=0, err=str(e))
     cache[ck] = out
     return out
 
 
 _lyrics_warned = [False]
-
-
-def patch_ytmusicapi():
-    """ytmusicapi 1.10.x (the newest that runs on Python 3.9) crashes with KeyError 'endpoint' in get_watch_playlist
-    when a tab has no link. Replace its tab lookup with the newer, tolerant one (find the lyrics tab by its type)."""
-    try:
-        import ytmusicapi.mixins.watch as mw
-    except Exception:
-        return
-    if not hasattr(mw, "get_tab_browse_id"):
-        return                                  # newer ytmusicapi: already fixed
-
-    def tab_browse_id(wnr, tab_id):
-        want = "MUSIC_PAGE_TYPE_TRACK_LYRICS" if tab_id == 1 else "MUSIC_PAGE_TYPE_TRACK_RELATED"
-        for tab in (wnr or {}).get("tabs", []):
-            be = ((tab.get("tabRenderer") or {}).get("endpoint") or {}).get("browseEndpoint") or {}
-            pt = ((be.get("browseEndpointContextSupportedConfigs") or {}).get("browseEndpointContextMusicConfig") or {}).get("pageType")
-            if pt == want and be.get("browseId"):
-                return be["browseId"]
-        return None
-    mw.get_tab_browse_id = tab_browse_id
-
-
-def lrclib_lyrics(title, artist, dur, cache):
-    """Synced lyrics from LRCLIB (free, open, no key), matched by title, artist and length (±2 s, so the timing fits
-    this recording). [[start_s, end_s, text], ...] or None. Cached."""
-    ck = f"lrc1|{norm(title)}|{first_artist(artist)}|{round(dur)}"
-    if ck in cache:
-        return cache[ck]
-    out = None
-    try:
-        raw_t = re.sub(r"[\(\[][^\)\]]*[\)\]]|\s-\s.*$", " ", title).strip() or title
-        res = get_json("https://lrclib.net/api/search?" + urllib.parse.urlencode(
-            {"track_name": raw_t, "artist_name": re.split(r",|&", artist)[0].strip()}))
-        best = None
-        for r in res if isinstance(res, list) else []:
-            if not r.get("syncedLyrics") or not dur or abs(float(r.get("duration") or 0) - dur) > 2:
-                continue
-            if base_title(r.get("trackName") or "") != base_title(title):
-                continue
-            if best is None or abs(r["duration"] - dur) < abs(best["duration"] - dur):
-                best = r
-        if best:
-            pts = []
-            for ln in best["syncedLyrics"].splitlines():
-                m = re.match(r"\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)", ln)
-                if m:
-                    pts.append((int(m.group(1)) * 60 + float(m.group(2)), m.group(3)))
-            out = [[a, (pts[i + 1][0] if i + 1 < len(pts) else a + 4), t] for i, (a, t) in enumerate(pts) if t.strip()]
-            out = out or None
-    except Exception:
-        return None                               # network trouble: don't cache, try again next run
-    cache[ck] = out
-    return out
 
 
 def timed_lyrics(yt, browse_id, cache):
@@ -700,7 +637,6 @@ def main():
         from ytmusicapi import YTMusic
     except ImportError:
         sys.exit("Install ytmusicapi first:  pip3 install ytmusicapi")
-    patch_ytmusicapi()
     yt = YTMusic(args.auth) if args.auth else YTMusic()
     pid = playlist_id(args.playlist)
     try:
@@ -823,16 +759,12 @@ def main():
         rep["sections"] = ""
         if entry["bpm"] and not entry["bars"]:
             lines = timed_lyrics(yt, wi.get("lyrics"), bpmcache) if ("ATV" in vtype or not vtype) else None
-            if not lines:      # YouTube had none: try LRCLIB, matched on this recording's exact length
-                lines = lrclib_lyrics(title, artist, dur, bpmcache)
             st = structure_from_lyrics(lines, entry["bpm"], dur) if lines else None
             if st:
                 entry.update(bars=st["bars"], wave=st["wave"], first_bar=st["first_bar"])
                 rep["sections"] = f"{st['choruses']} choruses, last ends {int(st['last_chorus_end'] // 60)}:{int(st['last_chorus_end'] % 60):02d}"
             else:
-                rep["sections"] = ("no repeating chorus in the lyrics" if lines else
-                                   "no timed lyrics on YouTube Music or LRCLIB for this exact recording" +
-                                   (f" (YouTube lookup failed: {wi['err']})" if wi.get("err") else ""))
+                rep["sections"] = ("no timed lyrics" if not lines else "no repeating chorus in the lyrics")                     if ("ATV" in vtype or not vtype) else "music video: lyrics timing may not match"
             print(f"    sections: {rep['sections']}")
         rep["bpm"] = entry["bpm"] or ""
         if entry["bpm"] is None:

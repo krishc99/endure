@@ -1,0 +1,40 @@
+# Builds an UNSIGNED iPhone app (.ipa) in the cloud. Sign + install it from your Mac with Sideloadly and your Apple ID.
+# Open Actions -> "Build iPhone app (unsigned)" -> latest run -> download "run-dj-iphone-ipa".
+name: Build iPhone app (unsigned)
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run bundle
+      - run: npx cap add ios
+      - name: Permission texts and Files-app access
+        run: |
+          P=ios/App/App/Info.plist
+          set_str () { /usr/libexec/PlistBuddy -c "Delete :$1" "$P" 2>/dev/null || true; /usr/libexec/PlistBuddy -c "Add :$1 string $2" "$P"; }
+          set_bool () { /usr/libexec/PlistBuddy -c "Delete :$1" "$P" 2>/dev/null || true; /usr/libexec/PlistBuddy -c "Add :$1 bool $2" "$P"; }
+          set_str NSMotionUsageDescription "Run DJ reads your running cadence from the motion of the phone."
+          set_str NSHealthShareUsageDescription "Run DJ can read your steps to match the music to your cadence."
+          set_str NSHealthUpdateUsageDescription "Run DJ does not write health data."
+          set_bool UIFileSharingEnabled true
+          set_bool LSSupportsOpeningDocumentsInPlace true
+      - run: npx cap sync ios
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -qry RunDJ-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: run-dj-iphone-ipa
+          path: RunDJ-unsigned.ipa

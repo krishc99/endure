@@ -2,6 +2,10 @@
 // A Deck looks like an <audio> element to the engine (src, currentTime, duration, ended, volume, play, pause,
 // 'loadedmetadata'), so the engine's crossfades, entry points and swaps work unchanged.
 // src 'yt:<videoId>' plays in an embedded YouTube player; anything else plays in a normal <audio>.
+// iPhone/iPad: web pages can't set an <audio> element's volume, and YouTube's embedded player ignores setVolume/mute.
+// So on iOS local files fade through Web Audio (a gain node per deck), and YouTube songs switch with a clean cut.
+const IOS=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+let ACX=null;
 let ytApi=null;
 const ytLoad=()=>ytApi||(ytApi=new Promise((res,rej)=>{
   if(window.YT&&window.YT.Player)return res();
@@ -56,7 +60,7 @@ class Deck{
   }
   set preload(v){
     this.au.preload=v;
-    if(this.mode==='yt'&&v==='auto')setTimeout(()=>this._prebuffer(),0);   // after the engine sets the entry point
+    if(this.mode==='yt'&&v==='auto'&&!IOS)setTimeout(()=>this._prebuffer(),0);   // after the engine sets the entry point (iOS: muting doesn't work there, so no silent pre-buffering)
   }
   get preload(){return this.au.preload}
   async _prebuffer(){
@@ -86,14 +90,22 @@ class Deck{
     return this.p&&this._loaded===this.vid&&this.p.getDuration?(this.p.getDuration()||0):0;
   }
   get ended(){return this.mode==='yt'?this._ended:this.au.ended}
-  get volume(){return this.mode==='yt'?this._vol:this.au.volume}
+  get volume(){return this.mode==='yt'||this.gain?this._vol:this.au.volume}
   set volume(v){
     this._vol=v;
-    if(this.mode!=='yt'){this.au.volume=v;return}
+    if(this.mode!=='yt'){if(this.gain)this.gain.gain.value=v;else this.au.volume=v;return}
     if(this.p&&this.p.setVolume)this.p.setVolume(Math.round(v*100));
   }
   play(){
-    if(this.mode!=='yt'){if(this.p)try{this.p.pauseVideo()}catch(e){};return this.au.play()}
+    if(this.mode!=='yt'){
+      if(this.p)try{this.p.pauseVideo()}catch(e){}
+      if(IOS&&!this.gain)try{               // first play happens inside the Start tap, which iOS needs to allow audio
+        ACX=ACX||new (window.AudioContext||window.webkitAudioContext)();
+        const src=ACX.createMediaElementSource(this.au);this.gain=ACX.createGain();this.gain.gain.value=this._vol;
+        src.connect(this.gain).connect(ACX.destination);this.au.volume=1;
+      }catch(e){this.gain=null}
+      if(ACX&&ACX.state==='suspended')ACX.resume().catch(()=>{});
+      return this.au.play()}
     this._want=true;this._ended=false;const vid=this.vid;
     this._box().style.zIndex=++ytTop;document.getElementById('ytbox').style.display='block';
     this._player().then(p=>{

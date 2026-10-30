@@ -360,6 +360,7 @@ if(BG){
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)bgRefresh()});
 }
 async function initApp(){
+  if(IOS)document.querySelectorAll('.andonly').forEach(e=>e.style.display='none');
   loadSettings();loadPlaylists();renderPlaylists();try{const p=localStorage.getItem('rundj_pool');if(p)$('pool').value=p}catch(e){}render();
   await loadLibrary();
   if(!allSongs.length)await restoreLibraryFile();     // e.g. after reinstalling the app

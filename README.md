@@ -66,6 +66,15 @@ control YouTube Music), **Display over other apps** (Android only lets an app st
 background with it), and ideally battery use *Unrestricted*. Experimental: how YouTube Music reacts can vary by version.
 Code: `plugins/rundj-background` (a local Capacitor plugin, built into the APK automatically).
 
+### iPhone
+GitHub also builds an unsigned iPhone app (*Actions → Build iPhone app (unsigned)* → `run-dj-iphone-ipa`). Install it from
+your Mac with [Sideloadly](https://sideloadly.io) and your Apple ID; with a free Apple ID it has to be re-installed every
+7 days. On the iPhone: Settings → Privacy & Security → Developer Mode on, and after installing, Settings → General →
+VPN & Device Management → trust your Apple ID. Differences from Android: YouTube songs switch with a cut (iOS doesn't let
+pages change YouTube's volume), local files still crossfade; no background mode (iPhones don't let one app drive another);
+no Health Connect. Phone motion, step counter, Manual and adding playlists by link all work; the library file is in
+Files → On My iPhone → Run DJ.
+
 ## 2. Build the app (pick one)
 **A. Cloud build, no Android Studio:** push this folder to a GitHub repo → *Actions* → "Build Android debug APK" →
 open the run → download `run-dj-debug-apk` → unzip → open `app-debug.apk` on the phone (allow "install unknown apps").

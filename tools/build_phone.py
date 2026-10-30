@@ -77,6 +77,10 @@ rep("$('go').textContent='⏹ Stop';log('— started —');", "$('go').textConte
 rep("t.energy=Math.min(1,Math.max(0,+v||0));", "t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;")
 rep("button,input[type=number]{", "button,input[type=number],input[type=text],input[type=url],input[type=password]{")
 rep(".set input[type=number]{width:100%}", ".set input[type=number],.set input[type=text],.set input[type=password]{width:100%}")
+# iOS can't fade YouTube's player: switch YouTube songs there with a cut (IOS comes from ytdeck.js)
+rep("  const xf=cur?S().xf:0,old=AU[ai];", "  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?S().xf:0,old=AU[ai];")
+# Health Connect is Android-only
+rep("<button id=\"src_hc\">Health Connect</button>", "<button id=\"src_hc\" class=\"andonly\">Health Connect</button>")
 # --- YouTube Music songs: both decks can play an embedded YouTube player as well as local audio (see ytdeck.js)
 rep("const AU=[new Audio(),new Audio()];", (HERE / "ytdeck.js").read_text() + "const AU=[new Deck(0),new Deck(1)];")
 rep("</style>", """#ytbox{display:none;position:relative;width:100%;aspect-ratio:16/9;margin-top:10px;border-radius:8px;overflow:hidden;background:#000}

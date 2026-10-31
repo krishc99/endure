@@ -305,7 +305,7 @@ const votesLine=t=>{                   // under the title of a "check" song: wha
   const A=window.RunDJAnalyzer;if(!A||t.src!=='check'||!t.votes||!t.votes.length)return '';
   return `<br><span class="small">${esc(A.votesText(t.votes,{bpm:t.bpm,bpmFeel:t.bpmFeel||'normal',flag:'check'}))}${t.bpmWhy?' — '+esc(t.bpmWhy):''}</span>`};
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey','edir','egap'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 

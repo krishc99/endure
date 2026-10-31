@@ -76,7 +76,7 @@ rep("+$('bpm').value", "cadence()", 3)
 rep("$('bpmv').textContent=b;", "$('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':'steps / BPM · manual';")
 rep("const post=(p,o)=>fetch(p,{method:'POST',body:JSON.stringify(o)});", "")
 rep("setInterval(draw,100);\nfetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});",
-    "setInterval(draw,100);\n" + (HERE / "motion.js").read_text() + (HERE / "phone_extra.js").read_text() + "\ninitApp();")
+    "setInterval(draw,100);\n" + (HERE / "motion.js").read_text() + (HERE / "phone_extra.js").read_text() + "\ninitApp();\n" + (HERE / "spike_applemusic.js").read_text())
 rep("plan=null;disarm();$('go').textContent='▶ Start';", "plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';")
 rep("$('go').textContent='⏹ Stop';log('— started —');", "$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');")
 rep("t.energy=Math.min(1,Math.max(0,+v||0));", "t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;")

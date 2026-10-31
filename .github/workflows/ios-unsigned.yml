@@ -23,6 +23,13 @@ jobs:
           set_str NSMotionUsageDescription "Run DJ reads your running cadence from the motion of the phone."
           set_str NSHealthShareUsageDescription "Run DJ can read your steps to match the music to your cadence."
           set_str NSHealthUpdateUsageDescription "Run DJ does not write health data."
+          set_str NSAppleMusicUsageDescription "Run DJ plays songs from your Apple Music library to match your running cadence."
+          set_str NSLocationWhenInUseUsageDescription "Run DJ can use location only to keep running while the screen is locked. It never reads or stores where you are."
+          # background modes (P3.0 spike tries both; one of them goes away once we know which is needed)
+          /usr/libexec/PlistBuddy -c "Delete :UIBackgroundModes" "$P" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$P"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$P"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:1 string location" "$P"
           set_bool UIFileSharingEnabled true
           set_bool LSSupportsOpeningDocumentsInPlace true
       - run: npx cap sync ios

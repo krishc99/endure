@@ -23,6 +23,7 @@
     "@capgo/capacitor-health": "^8.11.12",
     "@capgo/capacitor-pedometer": "^8.0.52",
     "essentia.js": "^0.1.3",
+    "rundj-applemusic": "file:plugins/rundj-applemusic",
     "rundj-background": "file:plugins/rundj-background"
   },
   "devDependencies": {

@@ -386,7 +386,9 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Nudge up by at most (BPM)<input type="number" id="pushmax" value="8"></label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
-  <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
+  <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label>
+  <label class="ck"><input type="checkbox" id="edir" checked> Follow your pace with energy: a rising pace picks a higher-energy song, a falling pace a lower one</label>
+  <label>Min energy gap for that<input type="number" id="egap" value="0.05" step="0.05" min="0" max="1"></label></div></section>
 <section class="card"><div class="lbl">Your songs · bright = fits current cadence · ⚡ = energy 0–1 (editable) · ½ / ×2 fix a wrong BPM</div><ul id="list"></ul></section>
 <section class="card"><div class="lbl">Event log</div><div id="log"></div></section>
 </main>
@@ -396,7 +398,7 @@ const SILENT='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAAB
 const AU=[new Audio(),new Audio()];
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,played=new Map(),playSeq=0,cadHist=[],pushSong=null,pushBase=0,nudgeLog=null;
 const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:$('push').checked,pushMax:+$('pushmax').value,xf:+$('xf').value,
-  ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
+  ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked,edir:$('edir').checked,egap:+$('egap').value||0});
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
 const logOnce=(k,m)=>{if(k!==lastKey){lastKey=k;log(m)}};
@@ -436,10 +438,10 @@ function nudgeCandidates(c,excl){
 // Your pace over the last minute: steady (range within 5) and not drifting down
 function paceTrend(){
   const now=performance.now(),w=cadHist.filter(x=>now-x[0]<=60000);
-  if(w.length<20)return {steady:false,slowing:false};
+  if(w.length<20)return {steady:false,slowing:false,rising:false};
   const v=w.map(x=>x[1]),first=v.slice(0,15),last=v.slice(-15),avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
-  const slowing=avg(last)-avg(first)<-1.5;
-  return {steady:Math.max(...v)-Math.min(...v)<=5&&!slowing,slowing};
+  const slowing=avg(last)-avg(first)<-1.5,rising=avg(last)-avg(first)>1.5;
+  return {steady:Math.max(...v)-Math.min(...v)<=5&&!slowing,slowing,rising};
 }
 const bestMatch=c=>{let r=null;for(const s of songs){const m=match(s,c);if(m&&(!r||m.cost<r.m.cost))r={s,m}}return r};
 const desc=m=>`${m.mode}, off by ${m.diff.toFixed(0)}`;
@@ -462,9 +464,22 @@ const candidates=(c,excl)=>{const r=[];for(const s of songs){if(s===excl)continu
 const bestOf=a=>a.reduce((x,y)=>!x||y.m.cost<x.m.cost?y:x,null);
 const songKey=s=>s.file||s.yt||s.id;
 const lastPlayed=s=>played.has(songKey(s))?played.get(songKey(s)):-1;
+// Pace rising: prefer a song with more energy than the one playing; pace falling: less. This never changes which songs fit
+// your tempo: it only narrows songs that already fit (and are next in the no-repeat order). If none is far enough in the wanted
+// direction, it takes the one whose energy is closest to the current song.
+function energyPref(fresh){
+  const st=S();if(!st.edir||!cur||fresh.length<2)return fresh;
+  const tr=paceTrend(),dir=tr.rising?1:tr.slowing?-1:0;if(!dir)return fresh;
+  const f=fresh.filter(x=>dir*(x.s.energy-cur.energy)>=st.egap);
+  if(f.length)return f;
+  // nothing is far enough in the wanted direction: take the fitting song(s) whose energy is closest to the current one
+  const o=fresh.filter(x=>x.s!==cur);if(!o.length)return fresh;
+  const d=x=>Math.abs(x.s.energy-cur.energy),m=Math.min(...o.map(d));
+  return o.filter(x=>d(x)<=m+1e-9);
+}
 function choose(cands){
   if(!cands||!cands.length)return null;
-  const oldest=Math.min(...cands.map(x=>lastPlayed(x.s))),fresh=cands.filter(x=>lastPlayed(x.s)===oldest);
+  const oldest=Math.min(...cands.map(x=>lastPlayed(x.s))),fresh0=cands.filter(x=>lastPlayed(x.s)===oldest),fresh=energyPref(fresh0);
   const b=bestOf(fresh),near=fresh.filter(x=>x.m.cost<=b.m.cost+S().spread);
   return near[Math.floor(rng()*near.length)];
 }
@@ -633,7 +648,7 @@ $('go').onclick=()=>{
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
   played=new Map();playSeq=0;cadHist=[];pushSong=null;$('go').textContent='⏹ Stop';log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax','edir','egap'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 fetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});
 </script></body></html>

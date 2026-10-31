@@ -25,6 +25,8 @@ public class Engine {
     public static class Settings {
         public double tol = 6, min = 30, mar = 3, spread = 4, ew = 3, htpen = 4, conf = 0.5, wait = 20, lead = 1.2;
         public boolean half = true, alt = true, hold = true, rotate = true, push = true;
+        public boolean edir = true;        // follow the pace with energy: rising pace → a higher-energy song, falling → a lower one
+        public double egap = 0.05;         // ...by at least this much energy
         public double pushMax = 8;
     }
 
@@ -82,6 +84,28 @@ public class Engine {
 
     int lastPlayed(Song s) { Integer v = played.get(s.yt); return v == null ? -1 : v; }
 
+    /**
+     * Pace rising: prefer a song with more energy than the one playing; pace falling: less. This never changes which songs
+     * fit the tempo: it only narrows songs that already fit (and are next in the no-repeat order), and does nothing if
+     * none qualifies.
+     */
+    List<Match> energyPref(List<Match> fresh) {
+        if (!st.edir || cur == null || fresh.size() < 2) return fresh;
+        boolean[] tr = trend();
+        int dir = tr[2] ? 1 : tr[1] ? -1 : 0;
+        if (dir == 0) return fresh;
+        List<Match> f = new ArrayList<>();
+        for (Match m : fresh) if (dir * (m.s.energy - cur.energy) >= st.egap) f.add(m);
+        if (!f.isEmpty()) return f;
+        // nothing is far enough in the wanted direction: take the fitting song(s) whose energy is closest to the current one
+        double best = Double.MAX_VALUE;
+        for (Match m : fresh) if (m.s != cur) best = Math.min(best, Math.abs(m.s.energy - cur.energy));
+        if (best == Double.MAX_VALUE) return fresh;
+        List<Match> closest = new ArrayList<>();
+        for (Match m : fresh) if (m.s != cur && Math.abs(m.s.energy - cur.energy) <= best + 1e-9) closest.add(m);
+        return closest;
+    }
+
     /** Songs not yet played this run first, then the one played longest ago; among those, a near-best match. */
     Match choose(List<Match> cands) {
         if (cands == null || cands.isEmpty()) return null;
@@ -89,6 +113,7 @@ public class Engine {
         for (Match m : cands) oldest = Math.min(oldest, lastPlayed(m.s));
         List<Match> fresh = new ArrayList<>();
         for (Match m : cands) if (lastPlayed(m.s) == oldest) fresh.add(m);
+        fresh = energyPref(fresh);
         Match b = bestOf(fresh);
         List<Match> near = new ArrayList<>();
         for (Match m : fresh) if (m.cost <= b.cost + st.spread) near.add(m);
@@ -119,17 +144,17 @@ public class Engine {
         return pick;
     }
 
-    /** {steady, slowing} over the last minute of readings. */
+    /** {steady, slowing, rising} over the last minute of readings. */
     boolean[] trend() {
         Double[] v = cadHist.toArray(new Double[0]);
         int n = Math.min(v.length, 60);
-        if (n < 20) return new boolean[]{false, false};
+        if (n < 20) return new boolean[]{false, false, false};
         double mn = 1e9, mx = -1e9, a = 0, b = 0;
         for (int i = v.length - n; i < v.length; i++) { mn = Math.min(mn, v[i]); mx = Math.max(mx, v[i]); }
         for (int i = v.length - n; i < v.length - n + 15; i++) a += v[i];
         for (int i = v.length - 15; i < v.length; i++) b += v[i];
-        boolean slowing = b / 15 - a / 15 < -1.5;
-        return new boolean[]{mx - mn <= 5 && !slowing, slowing};
+        boolean slowing = b / 15 - a / 15 < -1.5, rising = b / 15 - a / 15 > 1.5;
+        return new boolean[]{mx - mn <= 5 && !slowing, slowing, rising};
     }
 
     // ---------------------------------------------------------------- structure

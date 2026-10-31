@@ -63,7 +63,7 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
     <select id="pool"><option value="all">All songs</option><option value="yt">YouTube Music only</option><option value="local">Local files only</option></select></label>
   <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button><button id="savelib">Save library file</button><button id="clearlib">Clear</button></div>
   <input type="file" id="file" multiple accept=".json,application/json,audio/*" style="display:none">
-  <div class="small" id="impmsg" style="margin-top:6px"></div><div class="small" style="margin-top:6px">BPM data from <a href="https://www.deezer.com" target="_blank" rel="noopener">Deezer</a>, Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a></div></section>
+  <div class="small" id="impmsg" style="margin-top:6px"></div><div class="small" style="margin-top:6px">BPM data from Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a>. Synced lyrics from <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a>.</div></section>
 <section class="card">
   <div class="lbl">Now playing</div><div class="np" id="np">Press Start</div><div class="small" id="sub"></div><div id="ytbox"></div><div class="row" style="margin-top:8px;justify-content:flex-start"><button id="tap">Tap the beat</button><span class="small" id="tapv">Wrong BPM? Tap along 8+ times, then save.</span><button id="tapsave" class="p" style="display:none">Save</button></div>
   <div class="bar"><div class="fill" id="fill"></div><div class="mk" id="mkmin"></div><div class="mk b" id="mkb" style="display:none"></div></div>

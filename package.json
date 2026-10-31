@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "description": "Run DJ: cadence-matched music player (test app)",
   "scripts": {
-    "bundle": "esbuild src/bridge.js --bundle --format=iife --minify --external:fs --external:path --external:crypto --outfile=www/bridge.js",
+    "bundle": "esbuild src/bridge.js --bundle --format=iife --minify --external:fs --external:path --external:crypto --define:__DEV_SOURCES__=true --outfile=www/bridge.js",
+    "bundle:release": "esbuild src/bridge.js --bundle --format=iife --minify --external:fs --external:path --external:crypto --define:__DEV_SOURCES__=false --outfile=www/bridge.js",
     "page": "python3 tools/build_phone.py",
     "build": "npm run bundle && npm run page && cap sync android",
+    "build:release": "npm run bundle:release && npm run page && cap sync android",
     "open": "cap open android",
     "run": "cap run android"
   },

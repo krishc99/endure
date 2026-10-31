@@ -1,7 +1,7 @@
 // Run DJ on-phone analyser: playlist link → songs with BPM, energy and chorus sections → Run DJ library entries.
 // Same method as tools/yt_library.py, in the app:
-//   playlist  YouTube Music (YouTube's own web API, like ytmusicapi), Spotify (official Web API, your free client
-//             ID/secret) or Apple Music (the public playlist page; unofficial, best effort)
+//   playlist  Spotify (official Web API, your free client ID/secret). YouTube Music (youtubei) and Apple Music (public
+//             playlist page) are unofficial and only enabled when devSources is on (debug builds)
 //   playback  every song is matched to its YouTube Music audio version ("Topic"/ATV), which the app streams
 //   BPM       Apple's 30 s iTunes preview of the same version, measured with Essentia (3 estimators)
 //   sections  timed lyrics from LRCLIB, matched on the recording's length (±2 s): repeated lines = choruses
@@ -14,6 +14,14 @@ import Essentia from 'essentia.js/dist/essentia.js-core.es.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// App name + contact URL, as LRCLIB asks of API clients
+const LRCLIB_UA = 'RunDJ/0.2 (https://github.com/krishc99/endure)';
+
+// devSources: unofficial sources (YouTube Music's internal youtubei API, Apple Music's public playlist page).
+// ON in debug builds, OFF in release builds. Set at bundle time: `npm run bundle` (debug) / `npm run bundle:release`.
+let DEV_SOURCES = typeof __DEV_SOURCES__ !== 'undefined' ? !!__DEV_SOURCES__ : true;
+export const devSources = () => DEV_SOURCES;
+const needDev = what => { if (!DEV_SOURCES) throw new Error(what + ' is only available in debug builds (it relies on an unofficial source).'); };
 
 // ------------------------------------------------------------------ HTTP
 let httpOverride = null;            // tests inject a fake here
@@ -115,6 +123,7 @@ export function parseLink(s) {
 // ------------------------------------------------------------------ YouTube Music (the API music.youtube.com itself uses)
 let visitor = null;
 async function ytmVisitor() {
+  needDev('YouTube Music');
   if (visitor !== null) return visitor;
   try {
     const r = await http('GET', 'https://music.youtube.com/', { headers: { 'User-Agent': UA }, as: 'text' });
@@ -124,6 +133,7 @@ async function ytmVisitor() {
   return visitor;
 }
 async function ytm(endpoint, body, client) {
+  needDev('YouTube Music');
   const d = new Date(), ver = '1.' + d.getUTCFullYear() + String(d.getUTCMonth() + 1).padStart(2, '0') + String(d.getUTCDate()).padStart(2, '0') + '.01.00';
   const vid = await ytmVisitor();
   const headers = { 'Content-Type': 'application/json', 'User-Agent': UA, Origin: 'https://music.youtube.com', 'X-Goog-Visitor-Id': vid };
@@ -220,6 +230,7 @@ async function spotifyPlaylist(id, creds) {
 
 // ------------------------------------------------------------------ Apple Music (public playlist page; unofficial)
 async function applePlaylist(p) {
+  needDev('Apple Music playlist import');
   const r = await http('GET', p.url, { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, as: 'text' });
   const html = String(r.data || '');
   if (r.status >= 400 || !html) throw new Error('Apple Music: could not open the playlist page (HTTP ' + r.status + ').');
@@ -311,7 +322,7 @@ async function itunesBpm(title, artist, dur, isVideo, country) {
 async function lrclib(title, artist, dur) {
   if (!dur) return null;
   const rawT = title.replace(/[\(\[][^\)\]]*[\)\]]|\s-\s.*$/g, ' ').trim() || title;
-  const res = await getJSON('https://lrclib.net/api/search?' + new URLSearchParams({ track_name: rawT, artist_name: artist.split(/,|&/)[0].trim() }), { 'User-Agent': 'RunDJ/0.2 (personal app)' }).catch(() => null);
+  const res = await getJSON('https://lrclib.net/api/search?' + new URLSearchParams({ track_name: rawT, artist_name: artist.split(/,|&/)[0].trim() }), { 'User-Agent': LRCLIB_UA }).catch(() => null);
   let best = null;
   for (const r of Array.isArray(res) ? res : []) {
     if (!r.syncedLyrics || Math.abs((r.duration || 0) - dur) > 2 || baseTitle(r.trackName) !== baseTitle(title)) continue;
@@ -375,52 +386,6 @@ async function ytmTimedLyrics(videoId) {
   return null;
 }
 
-// ------------------------------------------------------------------ YouTube "Most replayed" heatmap → where the song peaks
-// Used when a song has no usable lyrics (instrumentals, remixes, rare songs): the most-replayed stretches are almost
-// always the chorus or the drop, which is exactly where a tempo-up swap should land.
-export function parseHeatmap(html) {
-  const out = [];
-  for (const m of String(html).matchAll(/\{[^{}]*"intensityScoreNormalized"\s*:\s*[\d.eE-]+[^{}]*\}/g)) {
-    const o = m[0], g = k => { const x = o.match(new RegExp('"' + k + '"\\s*:\\s*"?([\\d.eE-]+)')); return x ? +x[1] : null; };
-    const st = g('startMillis'), du = g('durationMillis'), it = g('intensityScoreNormalized');
-    if (st != null && du != null && it != null) out.push([st / 1000, du / 1000, it]);
-  }
-  if (!out.length) for (const m of String(html).matchAll(/\{[^{}]*"heatMarkerIntensityScoreNormalized"\s*:\s*[\d.eE-]+[^{}]*\}/g)) {
-    const o = m[0], g = k => { const x = o.match(new RegExp('"' + k + '"\\s*:\\s*"?([\\d.eE-]+)')); return x ? +x[1] : null; };
-    const st = g('timeRangeStartMillis'), du = g('markerDurationMillis'), it = g('heatMarkerIntensityScoreNormalized');
-    if (st != null && du != null && it != null) out.push([st / 1000, du / 1000, it]);
-  }
-  const seen = new Set();
-  return out.filter(x => !seen.has(x[0]) && seen.add(x[0])).sort((a, b) => a[0] - b[0]);
-}
-async function youtubeHeatmap(videoId) {
-  const r = await http('GET', 'https://www.youtube.com/watch?v=' + videoId + '&hl=en', { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, as: 'text' });
-  const h = r.status < 400 ? parseHeatmap(r.data) : [];
-  return h.length >= 20 ? h : null;
-}
-export function structureFromHeatmap(marks, bpm, dur) {
-  if (!marks || marks.length < 20 || !bpm || !dur || dur < 60) return null;
-  const at = t => { let v = marks[0][2]; for (const [s, d, i] of marks) { if (s <= t) v = i; else break; } return v; };
-  const vals = marks.filter(m => m[0] >= 15).map(m => m[2]), mx = Math.max(...vals), mn = Math.min(...vals);
-  if (!(mx - mn > 0.2)) return null;                       // flat heatmap: no clear peak
-  let bar = 240 / bpm; while (bar < 1.6) bar *= 2;
-  const bars = [];
-  for (let k = 0, t = 0; t < dur - 0.5; k++, t = k * bar) {
-    let n = (at(t + bar / 2) - mn) / (mx - mn);
-    if (t < 15) n = Math.min(n, 0.4);                        // everyone watches the start: not a peak
-    bars.push([Math.round(t * 100) / 100, 0, k % 8 === 0 ? 1 : 0, Math.round((0.3 + 0.65 * n) * 100) / 100]);
-  }
-  let peaks = 0;
-  bars.forEach((b, i) => {
-    const hi = x => x && x[3] >= 0.75;
-    if (hi(b) && !hi(bars[i - 1])) peaks++;
-    if (i && hi(bars[i - 1]) && !hi(b)) b[1] = 1; else b[1] = b[2] ? 0.25 : 0;
-  });
-  if (!peaks) return null;
-  const wave = Array.from({ length: 240 }, (_, i) => Math.round(100 * bars[Math.min(bars.length - 1, Math.floor(i / 240 * bars.length))][3]));
-  return { bars, wave, first_bar: 0, peaks };
-}
-
 // ------------------------------------------------------------------ YouTube embeddability
 async function embeddable(videoId) {
   try {
@@ -431,12 +396,11 @@ async function embeddable(videoId) {
 
 async function addSections(meta, isAudio) {
   const vid = meta.yt, dur = meta.dur, bpm = meta.bpm;
-  let lines = isAudio ? await ytmTimedLyrics(vid).catch(() => null) : null;
-  if (!lines) lines = await lrclib(meta.title, meta.artist, dur).catch(() => null);
+  // LRCLIB (public synced-lyrics database) is the primary source. YouTube Music's own timed lyrics are a dev-only extra.
+  let lines = await lrclib(meta.title, meta.artist, dur).catch(() => null);
+  if (!lines && DEV_SOURCES && isAudio && vid) lines = await ytmTimedLyrics(vid).catch(() => null);
   const st = lines ? structureFromLyrics(lines, bpm, dur) : null;
   if (st) return Object.assign(meta, { bars: st.bars, wave: st.wave, first_bar: st.first_bar, sections: `${st.choruses} choruses (lyrics)` });
-  const hm = await youtubeHeatmap(vid).catch(() => null), sh = hm ? structureFromHeatmap(hm, bpm, dur) : null;
-  if (sh) return Object.assign(meta, { bars: sh.bars, wave: sh.wave, first_bar: sh.first_bar, sections: `${sh.peaks} peaks (most replayed)` });
   meta.sections = 'no section data: enters about a quarter in';
   return meta;
 }
@@ -447,6 +411,7 @@ async function addSections(meta, isAudio) {
 export async function analyzePlaylist(link, opts, cb) {
   const p = typeof link === 'string' ? parseLink(link) : link;
   if (!p) throw new Error("That doesn't look like a YouTube Music, Spotify or Apple Music playlist link.");
+  if (!DEV_SOURCES && p.source !== 'spotify') throw new Error((p.source === 'youtube' ? 'YouTube Music' : 'Apple Music') + ' playlist import is only available in debug builds for now.');
   const country = opts.country || 'IN';
   cb.progress && cb.progress('Reading the playlist…');
   const pl = p.source === 'youtube' ? await ytmPlaylist(p.id, cb.progress) : p.source === 'spotify' ? await spotifyPlaylist(p.id, opts.spotify) : await applePlaylist(p);
@@ -478,7 +443,7 @@ export async function analyzePlaylist(link, opts, cb) {
       if (!b.bpm) { out.skipped.push([label, b.why]); continue; }
       const meta = { file: 'yt:' + vid, yt: vid, title: t.title, artist: t.artist, dur, bpm: b.bpm, src: b.src, alts: b.alts, energy: 0.5,
         feats: b.feats, flag: b.flag, match: b.match, bars: null, wave: null, first_bar: null };
-      // 3. sections: YouTube Music's timed lyrics, else LRCLIB's, else the "Most replayed" heatmap
+      // 3. sections: LRCLIB's timed lyrics, else the plain fallback (enters about a quarter in)
       await addSections(meta, /ATV/.test(type));
       out.added++;
       cb.song(meta, plId);
@@ -501,4 +466,4 @@ export function rankEnergy(metas) {
 
 export const songKey = (title, artist) => 't:' + norm(title) + '|' + firstArtist(artist);
 
-export const _test = { setHttp: f => { httpOverride = f; }, ytmTimedLyrics, youtubeHeatmap, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };
+export const _test = { setHttp: f => { httpOverride = f; }, setDevSources: v => { DEV_SOURCES = !!v; }, ytmTimedLyrics, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };

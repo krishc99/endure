@@ -11,26 +11,30 @@ Where each song's BPM comes from, in this order:
   1. tools/yt_overrides.json   your hand corrections, e.g. {"dQw4w9WgXcQ": 113} or {"dQw4w9WgXcQ": {"bpm": 113, "energy": 0.7}}
   2. tools/rundj_cache.json    the same song in your local library (analysed by dj_live.py): BPM, energy,
                                and beat/section data too when the durations match
-  3. Deezer (free, no key)     finds the SAME version on Deezer (title, artist, remix/acoustic/live tags and length must
-                               agree), reads Deezer's BPM for it, and double-checks it by measuring Deezer's public
-                               30-second preview of that version with librosa. Covers and remixes get their own tempo.
+  3. iTunes preview            finds the SAME version in Apple's iTunes Search (title, artist, remix/acoustic/live tags and
+                               length must agree) and measures its public 30-second preview with librosa.
+                               Covers and remixes get their own tempo.
   4. GetSongBPM API            optional fallback: --bpm-key KEY or the GETSONGBPM_KEY environment variable
 Songs with no BPM from any of these are left out and listed at the end, so you can add them to yt_overrides.json.
 Every song's source, matched version and both measurements go to bpm_report.csv; doubtful ones are marked "check"
 there and in the app's song list, so you know which to listen to and fix with ½ / ×2 or yt_overrides.json.
 
+This tool reads YouTube Music through ytmusicapi, an unofficial source, so it is a dev tool: it only runs while
+RUNDJ_DEV_SOURCES is not "0" (default on; the release app never uses it).
+
 Private playlists and Liked Music ("LM") need you signed in:   ytmusicapi browser   (follow its prompts, then pass
 --auth browser.json). Public and unlisted playlists work without it.
-BPM data from Deezer (https://www.deezer.com) and GetSongBPM (https://getsongbpm.com).
+BPM data from Apple iTunes previews and GetSongBPM (https://getsongbpm.com).
 """
 import argparse, csv, json, os, re, ssl, sys, tempfile, time, unicodedata, urllib.error, urllib.parse, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).parent
+DEV_SOURCES = os.environ.get("RUNDJ_DEV_SOURCES", "1") != "0"      # unofficial sources (ytmusicapi): on in debug, off in release
 OVERRIDES = HERE / "yt_overrides.json"
 LOCAL_CACHE = HERE / "rundj_cache.json"
 BPM_CACHE = HERE / "yt_bpm_cache.json"
-UA = {"User-Agent": "RunDJ/0.1 (personal test app)"}
+UA = {"User-Agent": "RunDJ/0.2 (https://github.com/krishc99/endure)"}   # app name + contact URL, as LRCLIB asks
 # python.org's macOS Python ships without CA certificates, so urllib can't verify HTTPS. Use certifi's (installed with
 # ytmusicapi's requests) when it's there.
 try:
@@ -138,7 +142,7 @@ def getsongbpm(title, artist, key, cache):
     return out
 
 
-# ------------------------------------------------------------ Deezer: the exact version's tempo
+# ------------------------------------------------------------ version tags
 # Words that change the tempo or the recording. "Radio edit", "remaster", "single version" don't change tempo, so ignored.
 VTAGS = ("remix", "acoustic", "live", "slowed", "sped up", "speed up", "nightcore", "unplugged", "piano", "orchestral",
          "cover", "reverb", "rework", "vip", "bootleg", "flip")
@@ -264,7 +268,7 @@ def itunes_bpm(vid, title, artist, dur, is_video, cache, use_preview):
             if not m:
                 return dict(bpm=None, why="iTunes preview couldn't be measured")
             bpm = m["bpm"]
-            out = dict(bpm=bpm, alts=[], src="itunes-preview", match=why, dz_bpm=None, pv_bpm=bpm, ests=m["ests"], feats=m["feats"],
+            out = dict(bpm=bpm, alts=[], src="itunes-preview", match=why, pv_bpm=bpm, ests=m["ests"], feats=m["feats"],
                        flag=f"{m['agree']} of {m['n']} estimators agree ({m['ests']})")
             if m["n"] >= 3 and m["agree"] < 3 or m["n"] == 2 and m["agree"] < 2:
                 out.update(src="check", flag=f"estimators disagree ({m['ests']}): listen and fix")
@@ -283,45 +287,6 @@ def itunes_bpm(vid, title, artist, dur, is_video, cache, use_preview):
         return dict(bpm=None, why=f"iTunes error: {e}")
     cache[ck] = out
     return out
-
-
-def deezer_available():
-    """Deezer's search is empty in countries where Deezer doesn't operate (India included)."""
-    try:
-        d = get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": "adele hello", "limit": 1}))
-        return bool(d.get("data"))
-    except Exception:
-        return False
-
-
-def deezer_match(title, artist, dur, is_video):
-    """Best Deezer track for this exact version, or None. Returns (track dict, why)."""
-    want_tags, want_a, want_t = version_tags(title), first_artist(artist), base_title(title)
-    raw_t = re.sub(r"[\(\[][^\)\]]*[\)\]]|\s-\s.*$", " ", title).strip().strip(".").replace('"', "") or title
-    q = f'track:"{raw_t}" artist:"{re.split(r",|&", artist)[0].strip()}"'
-    res = get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": q, "limit": 25})).get("data") or []
-    if not res:   # looser query: the advanced one is strict about punctuation
-        res = get_json("https://api.deezer.com/search?" + urllib.parse.urlencode({"q": f"{want_t} {want_a}", "limit": 25})).get("data") or []
-    best, why = None, "no Deezer track with this title and artist"
-    for x in res:
-        if base_title(x.get("title_short") or x.get("title")) != want_t:
-            continue
-        a = norm((x.get("artist") or {}).get("name"))
-        if not (want_a and (want_a in a or a in want_a)):
-            continue
-        tags = version_tags((x.get("title") or "") + " " + (x.get("title_version") or ""))
-        names = want_tags - CORE - {"unplugged"}           # the remixer's name must appear too
-        if (tags & CORE) != (want_tags & CORE) or not names <= tags:
-            why = f"Deezer has it, but not this version ({', '.join(sorted(want_tags)) or 'original'})"
-            continue
-        dd = abs(float(x.get("duration") or 0) - dur) if dur else 0
-        # official music videos run long (intros, outros); audio uploads should be within a few seconds
-        if dd > (60 if is_video else 20):
-            why = f"Deezer's closest version is {dd:.0f}s longer/shorter"
-            continue
-        if best is None or dd < best[1]:
-            best = (x, dd)
-    return (best[0], f"Δlength {best[1]:.0f}s") if best else (None, why)
 
 
 def load_audio(path, librosa):
@@ -451,47 +416,6 @@ def related(a, b, tol=0.04):
         if abs(b - a * m) / (a * m) <= tol:
             return k
     return None
-
-
-def deezer_bpm(vid, title, artist, dur, is_video, cache, use_preview):
-    """dict(bpm, alts, src, flag, match, dz_bpm, pv_bpm) or dict(bpm=None, why=...). Cached per video."""
-    ck = f"dz3|{vid}"
-    if ck in cache:
-        return cache[ck]
-    try:
-        x, why = deezer_match(title, artist, dur, is_video)
-        time.sleep(0.15)
-        if not x:
-            out = dict(bpm=None, why=why)
-        else:
-            tr = get_json(f"https://api.deezer.com/track/{x['id']}")
-            time.sleep(0.15)
-            dz = float(tr.get("bpm") or 0) or None
-            pv = preview_bpm(tr.get("preview") or x.get("preview")) if use_preview and (tr.get("preview") or x.get("preview")) else None
-            match = f"{tr.get('title') or x.get('title')} — {(x.get('artist') or {}).get('name')} ({why})"
-            out = dict(bpm=None, alts=[], src="deezer", flag="", match=match, dz_bpm=dz, pv_bpm=pv)
-            if dz and pv:
-                r = related(dz, pv)
-                out["bpm"] = dz
-                if r == "same":
-                    out["flag"] = "confirmed by preview"
-                elif r in ("double", "half"):
-                    out["alts"] = [dict(bpm=round(dz * 2, 1), conf=0.6)] if r == "double" and dz * 2 <= 220 else []
-                    out["flag"] = f"preview hears it {r}-time"
-                else:
-                    out.update(src="check", flag=f"Deezer {dz:.0f} vs preview {pv:.0f}: listen and fix")
-            elif dz:
-                out.update(bpm=dz, flag="Deezer only (no preview check)")
-            elif pv:
-                out.update(bpm=pv, src="deezer-preview", flag="measured from 30 s preview only")
-            else:
-                out = dict(bpm=None, why="Deezer has this version but no BPM, and the preview couldn't be measured")
-    except urllib.error.HTTPError as e:
-        return dict(bpm=None, why=f"Deezer HTTP {e.code}")          # not cached: try again next run
-    except Exception as e:
-        return dict(bpm=None, why=f"Deezer error: {e}")
-    cache[ck] = out
-    return out
 
 
 # ------------------------------------------------------------ song structure from YouTube Music's timed lyrics
@@ -680,75 +604,6 @@ def structure_from_lyrics(lines, bpm, dur):
                 last_chorus_end=round(runs[-1][1], 1))
 
 
-# ------------------------------------------------------------ YouTube "Most replayed" heatmap (fallback sections)
-def youtube_heatmap(vid, cache):
-    """[(start_s, dur_s, intensity 0..1), ...] from the video's 'Most replayed' graph, or None. Cached."""
-    ck = f"hm1|{vid}"
-    if ck in cache:
-        return cache[ck]
-    try:
-        req = urllib.request.Request(f"https://www.youtube.com/watch?v={vid}&hl=en", headers={**UA, "Accept-Language": "en"})
-        with urllib.request.urlopen(req, timeout=20, context=SSL_CTX) as r:
-            html = r.read().decode("utf-8", "ignore")
-    except Exception:
-        return None
-    out, seen = [], set()
-    for keys in (("startMillis", "durationMillis", "intensityScoreNormalized"),
-                 ("timeRangeStartMillis", "markerDurationMillis", "heatMarkerIntensityScoreNormalized")):
-        for m in re.finditer(r'\{[^{}]*"%s"\s*:\s*[\d.eE-]+[^{}]*\}' % keys[2], html):
-            o = m.group(0)
-            g = [re.search(r'"%s"\s*:\s*"?([\d.eE-]+)' % k, o) for k in keys]
-            if all(g):
-                st = float(g[0].group(1)) / 1000
-                if st not in seen:
-                    seen.add(st)
-                    out.append((st, float(g[1].group(1)) / 1000, float(g[2].group(1))))
-        if out:
-            break
-    out = sorted(out) if len(out) >= 20 else None
-    cache[ck] = out
-    return out
-
-
-def structure_from_heatmap(marks, bpm, dur):
-    """Per-bar structure from the heatmap: the most-replayed stretches (chorus / drop) become the high-energy runs."""
-    if not marks or len(marks) < 20 or not bpm or not dur or dur < 60:
-        return None
-    vals = [m[2] for m in marks if m[0] >= 15]
-    if not vals or max(vals) - min(vals) <= 0.2:
-        return None
-    mx, mn = max(vals), min(vals)
-    def at(t):
-        v = marks[0][2]
-        for m in marks:
-            if m[0] <= t:
-                v = m[2]
-            else:
-                break
-        return v
-    bar = 240.0 / bpm
-    while bar < 1.6:
-        bar *= 2
-    bars, k = [], 0
-    while k * bar < dur - 0.5:
-        t = k * bar
-        n = (at(t + bar / 2) - mn) / (mx - mn)
-        if t < 15:
-            n = min(n, 0.4)                    # everyone watches the start: not a peak
-        bars.append([round(t, 2), 0.0, 1 if k % 8 == 0 else 0, round(0.3 + 0.65 * n, 2)])
-        k += 1
-    hi = lambda x: x[3] >= 0.75
-    peaks = 0
-    for i, b in enumerate(bars):
-        if hi(b) and (i == 0 or not hi(bars[i - 1])):
-            peaks += 1
-        b[1] = 1.0 if i and hi(bars[i - 1]) and not hi(b) else (0.25 if b[2] else 0.0)
-    if not peaks:
-        return None
-    wave = [int(100 * bars[min(len(bars) - 1, int(i / 240 * len(bars)))][3]) for i in range(240)]
-    return dict(bars=bars, wave=wave, first_bar=0.0, peaks=peaks)
-
-
 # ------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -757,14 +612,15 @@ def main():
     ap.add_argument("--auth", help="ytmusicapi auth file (browser.json) for private playlists")
     ap.add_argument("--bpm-key", default=os.environ.get("GETSONGBPM_KEY"), help="GetSongBPM API key")
     ap.add_argument("--no-embed-check", action="store_true", help="skip checking that each video can play embedded")
-    ap.add_argument("--no-deezer", action="store_true", help="don't look songs up on Deezer")
-    ap.add_argument("--no-preview", action="store_true", help="don't measure Deezer's 30 s previews with librosa")
-    ap.add_argument("--recheck", action="store_true", help="ignore cached Deezer/GetSongBPM results")
+    ap.add_argument("--no-preview", action="store_true", help="don't measure the iTunes 30 s previews with librosa")
+    ap.add_argument("--recheck", action="store_true", help="ignore cached iTunes/GetSongBPM results")
     ap.add_argument("--keep-videos", action="store_true",
                     help="play music videos as listed (default: switch to the song's audio version, which has no "
                          "video intro/skits and lines up with the lyrics timing)")
     args = ap.parse_args()
 
+    if not DEV_SOURCES:
+        sys.exit("yt_library.py reads YouTube Music through ytmusicapi (an unofficial source) and is disabled while RUNDJ_DEV_SOURCES=0.")
     try:
         from ytmusicapi import YTMusic
     except ImportError:
@@ -779,17 +635,11 @@ def main():
                  "If it's private (or Liked Music), sign in with `ytmusicapi browser` and pass --auth browser.json.")
     tracks = [t for t in pl.get("tracks", []) if t.get("videoId")]
     print(f"Playlist “{pl.get('title', pid)}”: {len(tracks)} tracks")
-    if not args.no_deezer and not args.no_preview:
+    if not args.no_preview:
         try:
             import librosa  # noqa: F401
         except ImportError:
-            print("librosa isn't installed, so Deezer BPMs won't be double-checked against the previews "
-                  "(pip3 install librosa).")
-
-    use_dz = not args.no_deezer and deezer_available()
-    if not args.no_deezer and not use_dz:
-        print("Deezer returns no search results from your network (it doesn't operate in India), so BPMs will be "
-              "measured from Apple's 30 s iTunes previews of the same version instead.")
+            print("librosa isn't installed, so iTunes previews can't be measured (pip3 install librosa).")
     overrides, local, bpmcache = load(OVERRIDES, {}), local_index(), ({} if args.recheck else load(BPM_CACHE, {}))
     songs, missing, blocked, report = [], [], [], []
     for i, t in enumerate(tracks, 1):
@@ -844,7 +694,7 @@ def main():
         elif loc:
             entry.update(bpm=loc["bpm"], src=loc.get("src") or "detected", alts=loc.get("alts") or [])
         rep = dict(video=play_id, title=title, artist=artist, length=round(dur), bpm="", source="", flag="",
-                   matched="", deezer_bpm="", preview_bpm="")
+                   matched="", preview_bpm="")
         if ov is not None:
             rep.update(source="yt_overrides.json")
         elif loc:
@@ -852,12 +702,8 @@ def main():
         dzr = None
         if ov is None and not loc:
             is_video = "OMV" in vtype or "UGC" in vtype
-            dzr = deezer_bpm(play_id, title, artist, dur, is_video, bpmcache, not args.no_preview) if use_dz else dict(bpm=None)
-            if not dzr.get("bpm"):
-                itr = itunes_bpm(vid, title, artist, dur, is_video, bpmcache, not args.no_preview)
-                if itr.get("bpm") or not use_dz:
-                    dzr = dict(itr, why=itr.get("why") or dzr.get("why"))
-            if dzr.get("bpm") and args.bpm_key and not dzr.get("dz_bpm"):
+            dzr = itunes_bpm(vid, title, artist, dur, is_video, bpmcache, not args.no_preview)
+            if dzr.get("bpm") and args.bpm_key:
                 # second opinion from GetSongBPM's database for preview-only measurements
                 g = getsongbpm(title, artist, args.bpm_key, bpmcache)
                 if g:
@@ -870,8 +716,8 @@ def main():
                                    f"({dzr.get('ests', '')}): listen and fix")
             if dzr.get("bpm"):
                 entry.update(bpm=dzr["bpm"], src=dzr["src"], alts=dzr.get("alts") or [], _feats=dzr.get("feats"))
-                rep.update(source="Deezer" if dzr["src"] in ("deezer", "deezer-preview") or dzr.get("dz_bpm") else "iTunes preview", flag=dzr.get("flag", ""), matched=dzr.get("match", ""),
-                           deezer_bpm=dzr.get("dz_bpm") or "", preview_bpm=dzr.get("pv_bpm") or "")
+                rep.update(source="iTunes preview", flag=dzr.get("flag", ""), matched=dzr.get("match", ""),
+                           preview_bpm=dzr.get("pv_bpm") or "")
             print(f"    {'%.0f BPM' % dzr['bpm'] if dzr.get('bpm') else 'no BPM'} · {dzr.get('flag') or dzr.get('why', '')}")
         if entry["bpm"] is None and ov is None and not loc and args.bpm_key:
             g = getsongbpm(title, artist, args.bpm_key, bpmcache)
@@ -891,20 +737,17 @@ def main():
         # Sections from timed lyrics (only when the lyrics belong to exactly this recording)
         rep["sections"] = ""
         if entry["bpm"] and not entry["bars"]:
-            lines = timed_lyrics(yt, wi.get("lyrics"), bpmcache) if ("ATV" in vtype or not vtype) else None
-            if not lines:      # YouTube had none: try LRCLIB, matched on this recording's exact length
-                lines = lrclib_lyrics(title, artist, dur, bpmcache)
+            # LRCLIB first, matched on this recording's exact length; YouTube Music's own timed lyrics are a dev-only extra
+            lines = lrclib_lyrics(title, artist, dur, bpmcache)
+            if not lines and DEV_SOURCES and ("ATV" in vtype or not vtype):
+                lines = timed_lyrics(yt, wi.get("lyrics"), bpmcache)
             st = structure_from_lyrics(lines, entry["bpm"], dur) if lines else None
-            sh = None if st else structure_from_heatmap(youtube_heatmap(play_id, bpmcache), entry["bpm"], dur)
-            if sh:                     # no usable lyrics: use where people replay the song most
-                entry.update(bars=sh["bars"], wave=sh["wave"], first_bar=0.0)
-                rep["sections"] = f"{sh['peaks']} peaks from YouTube's 'Most replayed'"
-            elif st:
+            if st:
                 entry.update(bars=st["bars"], wave=st["wave"], first_bar=st["first_bar"])
                 rep["sections"] = f"{st['choruses']} choruses, last ends {int(st['last_chorus_end'] // 60)}:{int(st['last_chorus_end'] % 60):02d}"
             else:
                 rep["sections"] = ("no repeating chorus in the lyrics" if lines else
-                                   "no lyrics or 'Most replayed' data for this recording: enters about a quarter in" +
+                                   "no lyrics for this recording: enters about a quarter in" +
                                    (f" (YouTube lookup failed: {wi['err']})" if wi.get("err") else ""))
             print(f"    sections: {rep['sections']}")
         rep["bpm"] = entry["bpm"] or ""

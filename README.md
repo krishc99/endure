@@ -3,7 +3,7 @@
 Plays your songs to match your running cadence. Same engine and UI as the desktop test page, plus
 **Health Connect** step input and a **Manual** slider. Songs can be local files, a **YouTube Music playlist**, or both.
 
-BPM data from [Deezer](https://www.deezer.com/) and [GetSongBPM](https://getsongbpm.com/).
+BPM data from Apple iTunes previews and [GetSongBPM](https://getsongbpm.com/). Synced lyrics from [LRCLIB](https://lrclib.net/).
 
 ## 1. Prepare your songs (on the Mac)
 ```
@@ -19,14 +19,13 @@ pip3 install ytmusicapi librosa
 python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --out yt_library.json
 ```
 - BPM comes from, in order: `tools/yt_overrides.json` (your corrections); the same song in your local library (`dj_live.py`'s
-  cache, including beat/section data when it's the same recording); **Deezer** (free, no key), which finds the *same version*
-  (title, artist, remix/acoustic/live tags and length must agree, so covers and remixes get their own tempo), reads Deezer's BPM
-  and double-checks it by measuring Deezer's 30-second preview with librosa; where Deezer doesn't operate (India), Apple's
-  iTunes Search API instead (free, no key): same version-matching, BPM measured from its 30-second preview; then GetSongBPM
-  if you pass `--bpm-key`. iTunes allows ~20 lookups a minute, so a first run of a big playlist takes several minutes.
+  cache, including beat/section data when it's the same recording); Apple's **iTunes Search API** (free, no key), which
+  finds the *same version* (title, artist, remix/acoustic/live tags and length must agree, so covers and remixes get
+  their own tempo) and measures its 30-second preview with librosa; then GetSongBPM if you pass `--bpm-key`. iTunes allows
+  ~20 lookups a minute, so a first run of a big playlist takes several minutes.
   Install `essentia` (`pip3 install essentia`) for much better tempo on ballads and swing; each preview is measured by up
   to four estimators and songs where they disagree (including triplet 2/3 – 3/2 confusions) are marked **check**.
-- Song sections come from YouTube Music's **timed lyrics**: repeated lines mark the choruses. A song plays to the end of
+- Song sections come from **LRCLIB's timed lyrics** (YouTube Music's own timed lyrics are an extra in debug builds): repeated lines mark the choruses. Songs with no matching lyrics enter about a quarter in and swap ~3/4 through. A song plays to the end of
   its last chorus before rotating at a steady cadence, and the next one comes in at its first chorus. Music videos are
   switched to their audio version (no intro or skits; `--keep-videos` to turn that off). Energy is ranked from each
   preview's loudness, onset rate and brightness within the playlist, like the local analysis.
@@ -41,7 +40,7 @@ python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --ou
 - Changed the playlist? Rerun and import the new file; it replaces that playlist's songs and keeps your ½ / ×2 / energy edits.
 
 ### 1c. Or add playlists right in the app (no Mac needed)
-Paste a **YouTube Music**, **Spotify** or **Apple Music** playlist link into *Library → Add*. The phone does the whole analysis
+Paste a **Spotify** playlist link into *Library → Add* (**YouTube Music** and **Apple Music** playlist links work in debug builds only, see *devSources* below). The phone does the whole analysis
 itself, and the first songs start playing within about a minute while the rest are analysed:
 - each song is matched to its YouTube Music audio version (that's what plays); BPM is measured from Apple's 30 s iTunes
   preview of the same version with Essentia; chorus sections come from LRCLIB's timed lyrics; energy is ranked from the
@@ -50,8 +49,8 @@ itself, and the first songs start playing within about a minute while the rest a
 - add as many playlists as you like: they all live in one library (*Play from* can pick one), and the whole library is saved
   to `Documents/RunDJ/rundj_library.json` on the phone (restored automatically after a reinstall). *Refresh* re-syncs a playlist;
 - **Spotify** needs a free client ID and secret (developer.spotify.com → Create app), pasted in Settings. Only public playlists
-  made by users can be read; Spotify-made mixes are blocked for new apps. **Apple Music** reads the public playlist page, which
-  is unofficial and may break if Apple changes it;
+  made by users can be read; Spotify-made mixes are blocked for new apps. **YouTube Music** import (YouTube's internal youtubei API) and
+  **Apple Music** import (the public playlist page) are unofficial, so they sit behind the `devSources` flag (below);
 - tempo analysis uses [Essentia.js](https://mtg.github.io/essentia.js/) (AGPL-3.0).
 
 ### 1d. Background mode (app closed, screen locked) — Android
@@ -74,6 +73,14 @@ VPN & Device Management → trust your Apple ID. Differences from Android: YouTu
 pages change YouTube's volume), local files still crossfade; no background mode (iPhones don't let one app drive another);
 no Health Connect. Phone motion, step counter, Manual and adding playlists by link all work; the library file is in
 Files → On My iPhone → Run DJ.
+
+### devSources: debug vs release
+Unofficial sources (YouTube Music's internal youtubei API, `tools/yt_library.py`'s ytmusicapi, Apple Music's public playlist
+page, YouTube Music's timed lyrics) are behind a `devSources` flag: **on in debug builds, off in release builds**.
+`npm run bundle` / `npm run build` build with it on (this is what the GitHub debug-APK workflow uses);
+`npm run bundle:release` / `npm run build:release` build with it off, where YouTube Music and Apple Music links are refused.
+For `tools/yt_library.py` set `RUNDJ_DEV_SOURCES=0` to disable it. Removed outright: the YouTube "Most replayed" heatmap and Deezer.
+Sections now come from LRCLIB first, then the plain fallback (enters about a quarter in, swaps ~3/4 through).
 
 ## 2. Build the app (pick one)
 **A. Cloud build, no Android Studio:** push this folder to a GitHub repo → *Actions* → "Build Android debug APK" →

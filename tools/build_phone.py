@@ -98,7 +98,7 @@ rep('<div class="row" style="justify-content:flex-start"><button id="imp">Import
   <div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button>""")
 rep('<div class="small" id="impmsg" style="margin-top:6px"></div></section>',
     '<div class="small" id="impmsg" style="margin-top:6px"></div>'
-    '<div class="small" style="margin-top:6px">BPM data from <a href="https://www.deezer.com" target="_blank" rel="noopener">Deezer</a>, Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a></div></section>')
+    '<div class="small" style="margin-top:6px">BPM data from Apple iTunes previews and <a href="https://getsongbpm.com" target="_blank" rel="noopener">GetSongBPM</a>. Synced lyrics from <a href="https://lrclib.net" target="_blank" rel="noopener">LRCLIB</a>.</div></section>')
 out = HERE.parent / "www" / "index.html"
 out.write_text(P)
 print(f"wrote {out} ({len(P)//1024} KB)")

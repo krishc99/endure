@@ -88,6 +88,11 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>iTunes store country<input type="text" id="country" value="IN" maxlength="2"></label>
   <label>Spotify client ID<input type="text" id="spid" placeholder="for Spotify links"></label>
   <label>Spotify client secret<input type="password" id="spsec"></label>
+  <label>Double-time if energy ≥<input type="number" id="eHi" value="0.7" step="0.05" min="0" max="1"></label>
+  <label>…and detected BPM below<input type="number" id="bLow" value="100"></label>
+  <label>Half-time if energy ≤<input type="number" id="eLo" value="0.3" step="0.05" min="0" max="1"></label>
+  <label>…and detected BPM above<input type="number" id="bHigh" value="150"></label>
+  <label>GetSongBPM key (optional)<input type="text" id="gsbkey" placeholder="getsongbpm.com/api"></label>
   <label>Energy weight (BPM)<input type="number" id="ew" value="3" step="0.5"></label>
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
@@ -457,7 +462,7 @@ function render(){
   const k=[b,cur&&cur.id,ver,JSON.stringify(st)].join('|');
   if(k!==listKey){listKey=k;
     $('list').innerHTML=songs.map(t=>{const m=match(t,b),alts=(t.alts||[]).map(x=>`${x.bpm}@${x.conf}`).join(', ');
-      return `<li class="${m?'in':''} ${t===cur?'cur':''}"><span>${t===cur?'▶ ':''}${t.title} <span class="small">${t.artist}${m&&m.mode!=='1:1'?' · '+m.mode:''}</span></span>
+      return `<li class="${m?'in':''} ${t===cur?'cur':''}"><span>${t===cur?'▶ ':''}${t.title} <span class="small">${t.artist}${m&&m.mode!=='1:1'?' · '+m.mode:''}</span>${votesLine(t)}</span>
       <span title="${[alts?'alt tempos: '+alts:'',t.tempo_src?'tempo: '+t.tempo_src+(t.tempo_conf!=null?' (conf '+t.tempo_conf+', '+t.tempo_agree+'/3 estimators agree)':''):''].filter(Boolean).join(' · ')}">${t.bpm} <span class="small">${t.src}</span> ⚡<input class="en" type="number" step="0.1" min="0" max="1" value="${t.energy.toFixed(2)}" onchange="setEn(${t.id},this.value)">
       <button class="s" onclick="adj(${t.id},0.5)">½</button><button class="s" onclick="adj(${t.id},2)">×2</button></span></li>`}).join('')}
 }
@@ -612,15 +617,32 @@ let fileT=null;
 const fileSoon=()=>{clearTimeout(fileT);fileT=setTimeout(saveLibraryFile,4000)};
 async function libraryJSON(){const metas=await tx('meta','readonly',s=>s.getAll());
   return JSON.stringify({version:2,app:'Run DJ',saved:new Date().toISOString(),playlists,songs:metas.map(clean)})}
+// Android 11+ doesn't let an app write to the public Documents folder, so that usually fails. The copy kept inside the
+// app is deleted with the app: "Save library file" therefore also opens the share sheet, so a backup can go to Files, Drive, etc.
+// (restore it with Import songs… → pick the file).
+let docsOk=(()=>{try{return localStorage.getItem('rundj_docs')!=='0'}catch(e){return true}})();
+async function shareLibraryCopy(data){
+  const FS=native&&native.Filesystem,SH=native&&native.Share;if(!FS||!SH)return false;
+  try{
+    await FS.writeFile({path:'rundj_library.json',data,directory:native.Directory.Cache,encoding:native.Encoding.UTF8});
+    const {uri}=await FS.getUri({path:'rundj_library.json',directory:native.Directory.Cache});
+    await SH.share({title:'Run DJ library',dialogTitle:'Keep a copy of your library',files:[uri]});return true;
+  }catch(e){return false}                       // closing the sheet counts as an error too
+}
 async function saveLibraryFile(manual){
   const FS=native&&native.Filesystem;
   if(!FS){if(manual)say('impmsg','The library file is saved inside the Android app only.');return}
-  const data=await libraryJSON();
-  for(const dir of ['Documents','Data'])try{
-    await FS.writeFile({path:LIBFILE,data,directory:native.Directory[dir],encoding:native.Encoding.UTF8,recursive:true});
-    if(manual)say('impmsg',dir==='Documents'?`Saved to Documents/${LIBFILE.split('/')[0]}/ on this phone (open it in Files).`:'Saved in the app\'s own storage (Documents was not allowed).');
-    return dir;
-  }catch(e){if(dir==='Data'&&manual)say('impmsg','Could not save the library file: '+(e.message||e))}
+  const data=await libraryJSON();let dir=null,err='';
+  for(const d of docsOk?['Documents','Data']:['Data'])try{
+    await FS.writeFile({path:LIBFILE,data,directory:native.Directory[d],encoding:native.Encoding.UTF8,recursive:true});dir=d;break;
+  }catch(e){err=e.message||String(e);if(d==='Documents'){docsOk=false;try{localStorage.setItem('rundj_docs','0')}catch(x){}}}
+  if(manual){
+    if(dir==='Documents')say('impmsg',`Saved to Documents/${LIBFILE.split('/')[0]}/ on this phone (open it in Files).`);
+    else if(dir==='Data'){say('impmsg','Android does not let apps write to Documents here, so this copy is inside the app and is deleted if you uninstall it. Choose where to keep a backup…');
+      const ok=await shareLibraryCopy(data);say('impmsg',ok?'Backup shared. To restore later: Import songs… and pick that file.':'Saved inside the app only (no backup shared). Tap Save library file again to keep a copy elsewhere.')}
+    else say('impmsg','Could not save the library file: '+err);
+  }
+  return dir;
 }
 async function restoreLibraryFile(){
   const FS=native&&native.Filesystem;if(!FS)return false;
@@ -676,7 +698,9 @@ async function addPlaylist(link){
   const known=new Map();for(const m of allSongs)if(m.yt&&m.bpm){known.set(m.yt,m);known.set(A.songKey(m.title,m.artist),m)}
   let plId=null,ready=0;const seen=new Set();
   try{
-    const res=await A.analyzePlaylist(link,{country:($('country').value||'IN').toUpperCase(),spotify:{id:$('spid').value.trim(),secret:$('spsec').value.trim()},known,cancelled:()=>cancelReq},{
+    const local=new Map();for(const m of allSongs)if(!m.yt&&m.bpm)local.set(A.songKey(m.title,m.artist),m);
+    const res=await A.analyzePlaylist(link,{country:($('country').value||'IN').toUpperCase(),spotify:{id:$('spid').value.trim(),secret:$('spsec').value.trim()},
+      getsongbpmKey:$('gsbkey').value.trim(),bpm:bpmOpts(),local,known,cancelled:()=>cancelReq},{
       progress:t=>say('pstatus',t),
       playlist:info=>{plId=info.id;upsertPlaylist({id:info.id,name:info.name,source:info.source,link});renderPlaylists();log(`➕ ${info.name}: ${info.total} songs to check`)},
       song:async(meta,id)=>{
@@ -825,8 +849,19 @@ async function hcTest(){
   }catch(e){log('HC test failed: '+(e.message||e))}
 }
 
+// ---- BPM voting settings (Settings page). Changing one re-decides every song that has votes; your own edits stay as they are.
+const bpmOpts=()=>{const n=(id,d)=>{const v=parseFloat($(id).value);return isFinite(v)?v:d};
+  return {energyHi:n('eHi',0.7),bpmLow:n('bLow',100),energyLo:n('eLo',0.3),bpmHigh:n('bHigh',150)}};
+async function reresolve(){
+  const A=window.RunDJAnalyzer;if(!A)return;A.setBpmSettings(bpmOpts());
+  const ch=[];for(const m of allSongs){if(!m.votes)continue;const b=m.bpm,s=m.src,f=m.bpmFeel;A.resolveMeta(m);if(m.bpm!==b||m.src!==s||m.bpmFeel!==f)ch.push(m)}
+  if(ch.length){await tx('meta','readwrite',st=>ch.forEach(x=>st.put(clean(x))));ch.forEach(addLive);fileSoon();ver++;render()}
+}
+const votesLine=t=>{                   // under the title of a "check" song: what each source said and what was decided
+  const A=window.RunDJAnalyzer;if(!A||t.src!=='check'||!t.votes||!t.votes.length)return '';
+  return `<br><span class="small">${esc(A.votesText(t.votes,{bpm:t.bpm,bpmFeel:t.bpmFeel||'normal',flag:'check'}))}${t.bpmWhy?' — '+esc(t.bpmWhy):''}</span>`};
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 
@@ -846,6 +881,7 @@ AU.forEach(d=>d.onerror=(deck,vid,code,why)=>{
 });$('file').onchange=async e=>{const f=[...e.target.files];e.target.value='';await importFiles(f)};
 $('clearlib').onclick=()=>{if(confirm('Remove all imported songs from this phone?'))clearLibrary()};
 SAVED.forEach(id=>{$(id).addEventListener('change',saveSettings);$(id).addEventListener('input',saveSettings)});
+['eHi','bLow','eLo','bHigh'].forEach(id=>$(id).addEventListener('change',reresolve));
 // ---- tap tempo: fix the playing song's BPM by ear. Saved on the phone and kept when you re-import the playlist.
 let taps=[],tapBpm=null;
 $('tap').onclick=()=>{
@@ -913,6 +949,7 @@ if(BG){
 async function initApp(){
   if(IOS)document.querySelectorAll('.andonly').forEach(e=>e.style.display='none');
   loadSettings();loadPlaylists();renderPlaylists();try{const p=localStorage.getItem('rundj_pool');if(p)$('pool').value=p}catch(e){}render();
+  if(window.RunDJAnalyzer)window.RunDJAnalyzer.setBpmSettings(bpmOpts());
   await loadLibrary();
   if(!allSongs.length)await restoreLibraryFile();     // e.g. after reinstalling the app
   const want=(()=>{try{return localStorage.getItem('rundj_src')}catch(e){return null}})();

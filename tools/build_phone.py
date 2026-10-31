@@ -63,7 +63,12 @@ rep('<label>Max wait for good exit (s)<input type="number" id="wait" value="20">
   <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>
   <label>iTunes store country<input type="text" id="country" value="IN" maxlength="2"></label>
   <label>Spotify client ID<input type="text" id="spid" placeholder="for Spotify links"></label>
-  <label>Spotify client secret<input type="password" id="spsec"></label>''')
+  <label>Spotify client secret<input type="password" id="spsec"></label>
+  <label>Double-time if energy ≥<input type="number" id="eHi" value="0.7" step="0.05" min="0" max="1"></label>
+  <label>…and detected BPM below<input type="number" id="bLow" value="100"></label>
+  <label>Half-time if energy ≤<input type="number" id="eLo" value="0.3" step="0.05" min="0" max="1"></label>
+  <label>…and detected BPM above<input type="number" id="bHigh" value="150"></label>
+  <label>GetSongBPM key (optional)<input type="text" id="gsbkey" placeholder="getsongbpm.com/api"></label>''')
 rep('<script>\nconst $=', '<script src="bridge.js"></script>\n<script>\nconst $=')
 # --- audio comes from blobs stored on the phone; cadence from the chosen source
 rep("n.src='/song/'+x.s.id;", "n.src=srcFor(x.s);", 2)
@@ -77,6 +82,8 @@ rep("$('go').textContent='⏹ Stop';log('— started —');", "$('go').textConte
 rep("t.energy=Math.min(1,Math.max(0,+v||0));", "t.energy=Math.min(1,Math.max(0,+v||0));t.eEdit=1;")
 rep("button,input[type=number]{", "button,input[type=number],input[type=text],input[type=url],input[type=password]{")
 rep(".set input[type=number]{width:100%}", ".set input[type=number],.set input[type=text],.set input[type=password]{width:100%}")
+# songs whose sources disagree (src 'check') show every source's vote under the title (votesLine is in phone_extra.js)
+rep("${m&&m.mode!=='1:1'?' · '+m.mode:''}</span></span>", "${m&&m.mode!=='1:1'?' · '+m.mode:''}</span>${votesLine(t)}</span>")
 # iOS can't fade YouTube's player: switch YouTube songs there with a cut (IOS comes from ytdeck.js)
 rep("  const xf=cur?S().xf:0,old=AU[ai];", "  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?S().xf:0,old=AU[ai];")
 # Health Connect is Android-only

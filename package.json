@@ -9,7 +9,8 @@
     "build": "npm run bundle && npm run page && cap sync android",
     "build:release": "npm run bundle:release && npm run page && cap sync android",
     "open": "cap open android",
-    "run": "cap run android"
+    "run": "cap run android",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@capacitor-community/keep-awake": "^8.0.1",
@@ -18,6 +19,7 @@
     "@capacitor/core": "^8.5.3",
     "@capacitor/filesystem": "^8.1.5",
     "@capacitor/ios": "^8.6.0",
+    "@capacitor/share": "^8.0.3",
     "@capgo/capacitor-health": "^8.11.12",
     "@capgo/capacitor-pedometer": "^8.0.52",
     "essentia.js": "^0.1.3",

@@ -1,0 +1,8 @@
+{
+  "name": "rundj-applemusic",
+  "version": "0.0.1",
+  "description": "Run DJ: play Apple Music songs on iPhone through the system music player (MPMusicPlayerController). P3.0 spike: plays, seeks, reports state, and tests two ways to keep the app alive with the screen locked. No-op on Android.",
+  "private": true,
+  "capacitor": { "ios": { "src": "ios" } },
+  "files": ["ios/Sources/", "Package.swift"]
+}

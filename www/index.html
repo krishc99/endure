@@ -101,7 +101,9 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Nudge up by at most (BPM)<input type="number" id="pushmax" value="8"></label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
-  <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
+  <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label>
+  <label class="ck"><input type="checkbox" id="edir" checked> Follow your pace with energy: a rising pace picks a higher-energy song, a falling pace a lower one</label>
+  <label>Min energy gap for that<input type="number" id="egap" value="0.05" step="0.05" min="0" max="1"></label></div></section>
 <section class="card"><div class="lbl">Your songs · bright = fits current cadence · ⚡ = energy 0–1 (editable) · ½ / ×2 fix a wrong BPM</div><ul id="list"></ul></section>
 <section class="card"><div class="lbl">Event log</div><div id="log"></div></section>
 </main>
@@ -235,7 +237,7 @@ class Deck{
 const AU=[new Deck(0),new Deck(1)];
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,played=new Map(),playSeq=0,cadHist=[],pushSong=null,pushBase=0,nudgeLog=null;
 const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:$('push').checked,pushMax:+$('pushmax').value,xf:+$('xf').value,
-  ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
+  ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked,edir:$('edir').checked,egap:+$('egap').value||0});
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
 const logOnce=(k,m)=>{if(k!==lastKey){lastKey=k;log(m)}};
@@ -276,10 +278,10 @@ function nudgeCandidates(c,excl){
 // Your pace over the last minute: steady (range within 5) and not drifting down
 function paceTrend(){
   const now=performance.now(),w=cadHist.filter(x=>now-x[0]<=60000);
-  if(w.length<20)return {steady:false,slowing:false};
+  if(w.length<20)return {steady:false,slowing:false,rising:false};
   const v=w.map(x=>x[1]),first=v.slice(0,15),last=v.slice(-15),avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
-  const slowing=avg(last)-avg(first)<-1.5;
-  return {steady:Math.max(...v)-Math.min(...v)<=5&&!slowing,slowing};
+  const slowing=avg(last)-avg(first)<-1.5,rising=avg(last)-avg(first)>1.5;
+  return {steady:Math.max(...v)-Math.min(...v)<=5&&!slowing,slowing,rising};
 }
 const bestMatch=c=>{let r=null;for(const s of songs){const m=match(s,c);if(m&&(!r||m.cost<r.m.cost))r={s,m}}return r};
 const desc=m=>`${m.mode}, off by ${m.diff.toFixed(0)}`;
@@ -302,9 +304,17 @@ const candidates=(c,excl)=>{const r=[];for(const s of songs){if(s===excl)continu
 const bestOf=a=>a.reduce((x,y)=>!x||y.m.cost<x.m.cost?y:x,null);
 const songKey=s=>s.file||s.yt||s.id;
 const lastPlayed=s=>played.has(songKey(s))?played.get(songKey(s)):-1;
+// Pace rising: prefer a song with more energy than the one playing; pace falling: less. This never changes which songs fit
+// your tempo: it only narrows songs that already fit (and are next in the no-repeat order), and does nothing if none qualifies.
+function energyPref(fresh){
+  const st=S();if(!st.edir||!cur||fresh.length<2)return fresh;
+  const tr=paceTrend(),dir=tr.rising?1:tr.slowing?-1:0;if(!dir)return fresh;
+  const f=fresh.filter(x=>dir*(x.s.energy-cur.energy)>=st.egap);
+  return f.length?f:fresh;
+}
 function choose(cands){
   if(!cands||!cands.length)return null;
-  const oldest=Math.min(...cands.map(x=>lastPlayed(x.s))),fresh=cands.filter(x=>lastPlayed(x.s)===oldest);
+  const oldest=Math.min(...cands.map(x=>lastPlayed(x.s))),fresh0=cands.filter(x=>lastPlayed(x.s)===oldest),fresh=energyPref(fresh0);
   const b=bestOf(fresh),near=fresh.filter(x=>x.m.cost<=b.m.cost+S().spread);
   return near[Math.floor(rng()*near.length)];
 }
@@ -474,7 +484,7 @@ $('go').onclick=()=>{
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
   played=new Map();playSeq=0;cadHist=[];pushSong=null;$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax','edir','egap'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 // Cadence (steps/min) straight from the phone's accelerometer: no step counting, no sync lag.
 // Orientation-independent (uses the magnitude of acceleration), then finds the repeat period of the motion by
@@ -861,7 +871,7 @@ const votesLine=t=>{                   // under the title of a "check" song: wha
   const A=window.RunDJAnalyzer;if(!A||t.src!=='check'||!t.votes||!t.votes.length)return '';
   return `<br><span class="small">${esc(A.votesText(t.votes,{bpm:t.bpm,bpmFeel:t.bpmFeel||'normal',flag:'check'}))}${t.bpmWhy?' — '+esc(t.bpmWhy):''}</span>`};
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey','edir','egap'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 
@@ -959,4 +969,60 @@ async function initApp(){
 }
 
 initApp();
+// P3.0 spike card (iPhone only): can the app play an Apple Music song by store ID, seek in it, and keep working with the
+// screen locked? Shown at the bottom of the page above the event log. Delete this file and its build_phone.py line once P3 is done.
+(function spikeAppleMusic(){
+  const N=window.RunDJNative, AM=N&&N.AppleMusic;
+  if(!N||!N.isNative||N.platform!=='ios'||!AM)return;
+  const host=document.getElementById('log'); if(!host)return;
+  const card=document.createElement('section');card.className='card';
+  card.innerHTML=`<div class="lbl">Apple Music spike (P3.0 test)</div>
+  <div class="small">Needs an Apple Music subscription on this iPhone. Run the steps in order and send me the report at the bottom.</div>
+  <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="sp_auth">1 · Authorize</button></div>
+  <div class="row" style="justify-content:flex-start;margin-top:8px"><input type="text" id="sp_term" value="Skyfall Adele" style="flex:1"><button id="sp_find">2 · Find</button></div>
+  <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="sp_play">3 · Play, seek to 1:00 after 3 s</button></div>
+  <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="sp_pause">Pause</button><button id="sp_resume">Resume</button><button id="sp_stop">Stop</button></div>
+  <div class="small" style="margin-top:10px">Keep the app alive with the screen locked:</div>
+  <div class="row" style="justify-content:flex-start;margin-top:4px"><select id="sp_mode"><option value="off">Off</option><option value="location">Location</option><option value="audio">Silent audio</option></select><button id="sp_apply">4 · Apply</button><button id="sp_sched">5 · Locked test</button></div>
+  <div class="small" id="sp_live" style="margin-top:8px;font-family:monospace;white-space:pre-wrap"></div>
+  <div class="row" style="justify-content:flex-start;margin-top:8px"><button id="sp_report" class="p">Share report</button></div>
+  <div class="small" id="sp_log" style="margin-top:8px;font-family:monospace;white-space:pre-wrap;max-height:260px;overflow:auto"></div>`;
+  host.parentElement.parentElement.insertBefore(card,host.parentElement);
+  const $s=id=>document.getElementById(id), lines=[], t0=Date.now();
+  const stamp=()=>((Date.now()-t0)/1000).toFixed(1).padStart(6)+'s';
+  const say=m=>{lines.push(stamp()+'  '+m);$s('sp_log').textContent=lines.slice(-60).join('\n');$s('sp_log').scrollTop=1e9};
+  const j=o=>JSON.stringify(o);
+  const guard=(name,f)=>async()=>{try{say(name+' …');await f()}catch(e){say(name+' FAILED: '+(e&&e.message||j(e)))}};
+  let storeId='', ticks=0, lastTick=Date.now(), maxGap=0, events=0, last=null;
+  setInterval(()=>{const now=Date.now();ticks++;maxGap=Math.max(maxGap,now-lastTick);lastTick=now},1000);   // JS heartbeat: gaps mean the web view was frozen
+  AM.addListener('state',s=>{events++;last=s;say(`state ${s.playback} ${s.time.toFixed(1)}s "${s.title}"`)});
+  async function live(){try{const s=await AM.status(),p=await AM.state();
+    $s('sp_live').textContent=`music: ${p.playback} ${p.time.toFixed(1)}s of ${p.duration.toFixed(0)}s  ${p.title?'"'+p.title+'"':''}\nJS ticks ${ticks} (longest gap ${(maxGap/1000).toFixed(1)}s) · native ticks ${s.nativeBeats}\nkeep-alive ${s.mode} · location fixes ${s.locationFixes} (${s.locationAuth}) ${s.locationError}\nsilent audio ${s.audioPlaying?'playing':'no'} ${s.audioError} · modes ${s.backgroundModes.join(',')}`}catch(e){}}
+  setInterval(live,1000);
+
+  $s('sp_auth').onclick=guard('authorize',async()=>{const r=await AM.authorize();say('authorize → '+j(r))});
+  $s('sp_find').onclick=guard('find',async()=>{const r=await AM.findStoreId({term:$s('sp_term').value,country:'IN'});storeId=r.storeId;say(`found ${r.storeId} · ${r.artist} – ${r.title} (${r.durationSec.toFixed(0)}s)`)});
+  $s('sp_play').onclick=guard('play',async()=>{
+    if(!storeId)throw new Error('press Find first');
+    const r=await AM.play({storeId});say('playing → '+j(r));
+    setTimeout(async()=>{try{await AM.seek({sec:60});await new Promise(k=>setTimeout(k,2500));const p=await AM.state();
+      say(`SEEK ${p.time>=60&&p.time<75?'WORKED':'DID NOT WORK'}: asked 60.0s, now ${p.time.toFixed(1)}s (${p.playback})`)}catch(e){say('seek FAILED: '+(e.message||j(e)))}},3000)});
+  $s('sp_pause').onclick=guard('pause',async()=>say('pause → '+(await AM.pause()).playback));
+  $s('sp_resume').onclick=guard('resume',async()=>say('resume → '+(await AM.resume()).playback));
+  $s('sp_stop').onclick=guard('stop',async()=>say('stop → '+(await AM.stop()).playback));
+  $s('sp_apply').onclick=guard('keep-alive',async()=>{const r=await AM.keepAlive({mode:$s('sp_mode').value});say('keep-alive → '+j(r));
+    if($s('sp_mode').value==='location')say('if iOS asks for location, choose "Allow While Using App"')});
+  // Locked test: every 20 s our own JS timer seeks the song to a new place. Lock the phone right after pressing it, unlock after ~2 minutes.
+  let sched=null;
+  $s('sp_sched').onclick=guard('locked test',async()=>{
+    if(sched){clearInterval(sched);sched=null;say('locked test stopped');return}
+    if(!storeId)throw new Error('press Find and Play first');
+    let n=0;say('locked test started: JS seeks the song every 20 s. Lock the phone now, unlock after 2 minutes.');
+    sched=setInterval(async()=>{n++;const want=30+n*15;try{await AM.seek({sec:want});say(`JS timer #${n} fired (on time? see timestamps): seek to ${want}s`)}catch(e){say('JS timer seek failed: '+(e.message||j(e)))}},20000)});
+  $s('sp_report').onclick=guard('share',async()=>{
+    const s=await AM.status(),p=await AM.state();
+    const text=`RunDJ Apple Music spike\niOS ${navigator.userAgent}\nkeep-alive: ${s.mode} · modes ${s.backgroundModes.join(',')}\nJS ticks ${ticks}, longest gap ${(maxGap/1000).toFixed(1)}s, native ticks ${s.nativeBeats}, location fixes ${s.locationFixes} (${s.locationAuth}) ${s.locationError}, silent audio ${s.audioPlaying} ${s.audioError}\nnow: ${j(p)}\nstate events ${events}\n\n`+lines.join('\n');
+    try{await N.Share.share({title:'Apple Music spike report',text})}catch(e){try{await navigator.clipboard.writeText(text);say('report copied to clipboard')}catch(_){say(text)}}});
+})();
+
 </script></body></html>

@@ -99,9 +99,29 @@ this repo). The project stopped accepting submissions in 2022 and its API is fro
 many songs have no data and that is normal; after 3 failures in a row it is skipped for the rest of the session. Only the
 tempo and danceability are read for now (mood is not).
 
+*Energy direction.* After the tempo fit (and the no-repeat order) have decided which songs are candidates, the engine looks at
+your pace over the last minute: **rising** (the last 15 s average is more than 1.5 steps/min above the first 15 s) or
+**slowing** (more than 1.5 below). While rising it prefers songs with *higher* energy than the current song, while slowing
+*lower* energy, by at least the energy gap in *Settings* (default 0.05). It never changes which songs fit your tempo; it only
+chooses among the ones that already fit, and if none has the right energy direction the normal pick is used. A steady pace
+has no preference. It can be turned off in *Settings*. The same rule runs in the app and in Android background mode
+(`Engine.java`; test: `test/java/dev/krish/rundj/bg/EngineEnergyTest.java`, run command in its header).
+
 *Songs analysed before voting* have no votes and keep their tempo until they are analysed again. Tests: `npm test`
 (the resolver, the AcousticBrainz/GetSongBPM lookups with a fake network, and the energy re-check) and
 `python3 -m unittest tools/test_bpm_resolve.py`.
+
+### Apple Music on iPhone: P3.0 spike (temporary)
+Before building the real Apple Music backend, the iPhone build has a test card at the bottom of the page (**Apple Music
+spike**) that checks what the free-Apple-ID sideloaded app can do with the system music player (`MPMusicPlayerController`,
+no MusicKit, no paid developer account). Plugin: `plugins/rundj-applemusic` (local Capacitor plugin, Swift). It needs an
+Apple Music subscription on the iPhone. To test: install the new `run-dj-iphone-ipa`, open Settings → scroll to the card, then
+1. **Authorize** (allow Media & Apple Music), 2. **Find** a song (iTunes store ID), 3. **Play**: it should start, and after 3 s
+jump to 1:00 (the log says SEEK WORKED), 4. pick **Location**, press **Apply**, allow location "While Using", lock the phone
+for 2 minutes with music playing, unlock, and look at the "JS ticks / longest gap / native ticks / location fixes" lines,
+then repeat with **Silent audio**. 5. **Locked test** makes our own timer seek the song every 20 s: after unlocking, the log
+timestamps show whether those timer calls ran while the screen was locked. **Share report** sends me the log.
+The card is removed once P3 is finished.
 
 ### devSources: debug vs release
 Unofficial sources (YouTube Music's internal youtubei API, `tools/yt_library.py`'s ytmusicapi, Apple Music's public playlist

@@ -7,5 +7,6 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 import * as Analyzer from './analyzer.js';
 const Background = registerPlugin('RunDJBackground');   // plugins/rundj-background (Android)
-window.RunDJNative = { isNative: Capacitor.isNativePlatform(), Background, Health, Pedometer: CapacitorPedometer, KeepAwake, Filesystem, Directory, Encoding, Share };
+const AppleMusic = registerPlugin('RunDJAppleMusic');   // plugins/rundj-applemusic (iOS)
+window.RunDJNative = { isNative: Capacitor.isNativePlatform(), platform: Capacitor.getPlatform(), Background, AppleMusic, Health, Pedometer: CapacitorPedometer, KeepAwake, Filesystem, Directory, Encoding, Share };
 window.RunDJAnalyzer = Analyzer;

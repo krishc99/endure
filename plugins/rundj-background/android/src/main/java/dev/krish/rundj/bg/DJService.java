@@ -115,6 +115,7 @@ public class DJService extends Service implements SensorEventListener {
         st.conf = s.optDouble("conf", st.conf); st.wait = s.optDouble("wait", st.wait);
         st.push = s.optBoolean("push", true); st.pushMax = s.optDouble("pushMax", 8);
         st.half = s.optBoolean("half", true); st.alt = s.optBoolean("alt", true); st.hold = s.optBoolean("hold", true); st.rotate = s.optBoolean("rotate", true);
+        st.edir = s.optBoolean("edir", true); st.egap = s.optDouble("egap", st.egap);
         dip = s.optBoolean("dip", true);
         st.lead = dip ? 1.2 : 0.3;
         useSteps = "ped".equals(s.optString("source", "motion"));

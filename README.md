@@ -103,7 +103,7 @@ tempo and danceability are read for now (mood is not).
 your pace over the last minute: **rising** (the last 15 s average is more than 1.5 steps/min above the first 15 s) or
 **slowing** (more than 1.5 below). While rising it prefers songs with *higher* energy than the current song, while slowing
 *lower* energy, by at least the energy gap in *Settings* (default 0.05). It never changes which songs fit your tempo; it only
-chooses among the ones that already fit, and if none has the right energy direction the normal pick is used. A steady pace
+chooses among the ones that already fit, and if none is far enough in the right direction, it takes the fitting song whose energy is closest to the current one. A steady pace
 has no preference. It can be turned off in *Settings*. The same rule runs in the app and in Android background mode
 (`Engine.java`; test: `test/java/dev/krish/rundj/bg/EngineEnergyTest.java`, run command in its header).
 

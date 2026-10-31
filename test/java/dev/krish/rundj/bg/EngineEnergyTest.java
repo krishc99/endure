@@ -60,8 +60,14 @@ public class EngineEnergyTest {
         // nothing qualifies in the wanted direction: falls back to all fitting songs
         Engine e2 = engine(new Engine.Settings(), song("a", 160, 0.1), song("b", 160, 0.2), song("c", 160, 0.3)); e2.cur = song("cur", 160, 0.9);
         pace(e2, 150, 160);
-        boolean ok = true; for (int i = 0; i < 100; i++) ok &= e2.choose(e2.candidates(160, e2.cur)) != null;
-        check(ok, "rising but every song has lower energy: still picks something that fits");
+        r = picks(e2, 160, 100);
+        check(r[0] > 0.29 && r[1] < 0.31, "rising but every song has lower energy: picks the closest one, 0.3 (range " + r[0] + " to " + r[1] + ")");
+
+        // falling, only higher-energy songs fit: the closest one again
+        Engine e2b = engine(new Engine.Settings(), song("a", 160, 0.6), song("b", 160, 0.8), song("c", 160, 0.95)); e2b.cur = song("cur", 160, 0.5);
+        pace(e2b, 170, 160);
+        r = picks(e2b, 160, 100);
+        check(r[0] > 0.59 && r[1] < 0.61, "falling but every song has higher energy: picks the closest one, 0.6 (range " + r[0] + " to " + r[1] + ")");
 
         // a gap smaller than the minimum doesn't count
         Engine.Settings st = new Engine.Settings(); st.egap = 0.3;

@@ -96,7 +96,14 @@ public class Engine {
         if (dir == 0) return fresh;
         List<Match> f = new ArrayList<>();
         for (Match m : fresh) if (dir * (m.s.energy - cur.energy) >= st.egap) f.add(m);
-        return f.isEmpty() ? fresh : f;
+        if (!f.isEmpty()) return f;
+        // nothing is far enough in the wanted direction: take the fitting song(s) whose energy is closest to the current one
+        double best = Double.MAX_VALUE;
+        for (Match m : fresh) if (m.s != cur) best = Math.min(best, Math.abs(m.s.energy - cur.energy));
+        if (best == Double.MAX_VALUE) return fresh;
+        List<Match> closest = new ArrayList<>();
+        for (Match m : fresh) if (m.s != cur && Math.abs(m.s.energy - cur.energy) <= best + 1e-9) closest.add(m);
+        return closest;
     }
 
     /** Songs not yet played this run first, then the one played longest ago; among those, a near-best match. */

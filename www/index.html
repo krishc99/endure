@@ -305,12 +305,17 @@ const bestOf=a=>a.reduce((x,y)=>!x||y.m.cost<x.m.cost?y:x,null);
 const songKey=s=>s.file||s.yt||s.id;
 const lastPlayed=s=>played.has(songKey(s))?played.get(songKey(s)):-1;
 // Pace rising: prefer a song with more energy than the one playing; pace falling: less. This never changes which songs fit
-// your tempo: it only narrows songs that already fit (and are next in the no-repeat order), and does nothing if none qualifies.
+// your tempo: it only narrows songs that already fit (and are next in the no-repeat order). If none is far enough in the wanted
+// direction, it takes the one whose energy is closest to the current song.
 function energyPref(fresh){
   const st=S();if(!st.edir||!cur||fresh.length<2)return fresh;
   const tr=paceTrend(),dir=tr.rising?1:tr.slowing?-1:0;if(!dir)return fresh;
   const f=fresh.filter(x=>dir*(x.s.energy-cur.energy)>=st.egap);
-  return f.length?f:fresh;
+  if(f.length)return f;
+  // nothing is far enough in the wanted direction: take the fitting song(s) whose energy is closest to the current one
+  const o=fresh.filter(x=>x.s!==cur);if(!o.length)return fresh;
+  const d=x=>Math.abs(x.s.energy-cur.energy),m=Math.min(...o.map(d));
+  return o.filter(x=>d(x)<=m+1e-9);
 }
 function choose(cands){
   if(!cands||!cands.length)return null;

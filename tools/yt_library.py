@@ -14,7 +14,12 @@ Where each song's BPM comes from, in this order:
   3. iTunes preview            finds the SAME version in Apple's iTunes Search (title, artist, remix/acoustic/live tags and
                                length must agree) and measures its public 30-second preview with librosa.
                                Covers and remixes get their own tempo.
-  4. GetSongBPM API            optional fallback: --bpm-key KEY or the GETSONGBPM_KEY environment variable
+  4. AcousticBrainz            tempo of the same recording via MusicBrainz (best effort: the project stopped taking
+                               submissions in 2022, so many songs have no data). --no-acousticbrainz turns it off.
+  5. GetSongBPM API            optional: --bpm-key KEY or the GETSONGBPM_KEY environment variable
+These are votes: the highest in this list is the tempo, the others only decide whether the song is marked "check" (they
+disagree). A high-energy song detected slow becomes double-time, a low-energy one detected fast becomes half-time
+(--energy-hi / --bpm-low / --energy-lo / --bpm-high). Your own edits are never changed. Every vote goes to bpm_report.csv.
 Songs with no BPM from any of these are left out and listed at the end, so you can add them to yt_overrides.json.
 Every song's source, matched version and both measurements go to bpm_report.csv; doubtful ones are marked "check"
 there and in the app's song list, so you know which to listen to and fix with ½ / ×2 or yt_overrides.json.
@@ -30,6 +35,8 @@ import argparse, csv, json, os, re, ssl, sys, tempfile, time, unicodedata, urlli
 from pathlib import Path
 
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+from bpm_resolve import resolve_bpm, votes_text, LABEL as SRC_LABEL
 DEV_SOURCES = os.environ.get("RUNDJ_DEV_SOURCES", "1") != "0"      # unofficial sources (ytmusicapi): on in debug, off in release
 OVERRIDES = HERE / "yt_overrides.json"
 LOCAL_CACHE = HERE / "rundj_cache.json"
@@ -287,6 +294,79 @@ def itunes_bpm(vid, title, artist, dur, is_video, cache, use_preview):
         return dict(bpm=None, why=f"iTunes error: {e}")
     cache[ck] = out
     return out
+
+
+MB_UA = {"User-Agent": "RunDJ/0.2 ( https://github.com/krishc99/endure )"}
+_last_mb, _ab_fails = [0.0], [0]
+
+
+def acousticbrainz_vote(title, artist, dur, cache):
+    """Vote from AcousticBrainz (via MusicBrainz, 1 request a second), or None. Misses are cached; an unreachable
+    service is given up on after 3 failures in a row. Missing data is normal."""
+    ck = f"ab1|{norm(title)}|{first_artist(artist)}|{round(dur)}"
+    if ck in cache:
+        return cache[ck] or None
+    if _ab_fails[0] >= 3:
+        return None
+    out = None
+    try:
+        raw_t = re.sub(r"[\(\[][^\)\]]*[\)\]]|\s-\s.*$", " ", title).replace('"', " ").strip() or title
+        q = f'recording:"{raw_t}" AND artist:"{re.split(r",|&", artist)[0].replace(chr(34), " ").strip()}"'
+        wait = 1.1 - (time.time() - _last_mb[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_mb[0] = time.time()
+        recs = get_json("https://musicbrainz.org/ws/2/recording?" + urllib.parse.urlencode({"query": q, "fmt": "json", "limit": 10}),
+                        headers=MB_UA).get("recordings") or []
+        cands = [(r.get("title") or "", ", ".join((c.get("name") or "") for c in r.get("artist-credit") or []),
+                  (r.get("length") or 0) / 1000, r) for r in recs]
+        for _ in range(3):
+            x, why, extra = pick_version(cands, title, artist, dur, False)
+            if not x:
+                break
+            cands = [c for c in cands if c[3] is not x]
+            try:
+                d = get_json(f"https://acousticbrainz.org/api/v1/{x['id']}/low-level", headers=MB_UA, timeout=30)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    continue                       # no analysis for this recording: normal
+                raise
+            rh = d.get("rhythm") or {}
+            bpm = float(rh.get("bpm") or 0)
+            if 40 <= bpm <= 250:
+                out = dict(value=round(bpm, 1), source="acousticbrainz", confidence=0.6, mbid=x["id"])
+                break
+        _ab_fails[0] = 0
+    except Exception as e:
+        _ab_fails[0] += 1
+        print(f"    AcousticBrainz unavailable ({e})" + (" - not trying again this run" if _ab_fails[0] >= 3 else ""))
+        return None
+    cache[ck] = out or {}
+    return out
+
+
+def preview_vote(r):
+    """The iTunes preview measurement as a vote: confidence = share of estimators that agree; its own doubts travel with it."""
+    m = re.search(r"(\d+) of (\d+) estimators agree", r.get("flag") or "")
+    v = dict(value=r["bpm"], source="preview", confidence=round(int(m.group(1)) / int(m.group(2)), 2) if m else 0.4)
+    if r.get("src") == "check":
+        v["doubt"] = r.get("flag") or "the preview measurement is doubtful"
+    return v
+
+
+def apply_resolution(entry, res):
+    """Write the resolver's decision into the library entry (the same fields src/analyzer.js resolveMeta sets)."""
+    entry["bpmFlag"], entry["bpmFeel"], entry["bpmWhy"] = res["flag"], res["feel"], res["why"]
+    if res["source"] == "override":
+        return
+    entry["bpm"] = res["bpm"]
+    entry["src"] = "check" if res["flag"] == "check" else SRC_LABEL[res["source"]]
+    entry["flag"] = res["why"]
+    if res["source"] != "local":                      # the other reading of the song, for the matcher
+        if res["feel"] != "normal":
+            entry["alts"] = [dict(bpm=round(res["detected"], 1), conf=0.5)]
+        else:
+            entry["alts"] = [dict(bpm=round(res["bpm"] * 2, 1), conf=0.5)] if res["bpm"] < 110 and res["bpm"] * 2 <= 220 else []
 
 
 def load_audio(path, librosa):
@@ -613,11 +693,17 @@ def main():
     ap.add_argument("--bpm-key", default=os.environ.get("GETSONGBPM_KEY"), help="GetSongBPM API key")
     ap.add_argument("--no-embed-check", action="store_true", help="skip checking that each video can play embedded")
     ap.add_argument("--no-preview", action="store_true", help="don't measure the iTunes 30 s previews with librosa")
+    ap.add_argument("--no-acousticbrainz", action="store_true", help="don't ask AcousticBrainz for a second tempo vote")
+    ap.add_argument("--energy-hi", type=float, default=0.7, help="double-time if energy is at least this ... (default 0.7)")
+    ap.add_argument("--bpm-low", type=float, default=100, help="... and the detected BPM is below this (default 100)")
+    ap.add_argument("--energy-lo", type=float, default=0.3, help="half-time if energy is at most this ... (default 0.3)")
+    ap.add_argument("--bpm-high", type=float, default=150, help="... and the detected BPM is above this (default 150)")
     ap.add_argument("--recheck", action="store_true", help="ignore cached iTunes/GetSongBPM results")
     ap.add_argument("--keep-videos", action="store_true",
                     help="play music videos as listed (default: switch to the song's audio version, which has no "
                          "video intro/skits and lines up with the lyrics timing)")
     args = ap.parse_args()
+    rsettings = dict(energyHi=args.energy_hi, bpmLow=args.bpm_low, energyLo=args.energy_lo, bpmHigh=args.bpm_high)
 
     if not DEV_SOURCES:
         sys.exit("yt_library.py reads YouTube Music through ytmusicapi (an unofficial source) and is disabled while RUNDJ_DEV_SOURCES=0.")
@@ -686,47 +772,49 @@ def main():
                      bpm=None, src=None, alts=[], energy=0.5, bars=None, wave=None, first_bar=None)
         ov = overrides.get(vid, overrides.get(play_id))
         loc = local.get((norm(title), first_artist(artist)))
+        rep = dict(video=play_id, title=title, artist=artist, length=round(dur), bpm="", source="", flag="",
+                   matched="", preview_bpm="", votes="", feel="", check="")
+        votes, dzr = [], None
         if ov is not None:
             ov = ov if isinstance(ov, dict) else {"bpm": ov}
+            votes.append(dict(source="override", value=float(ov["bpm"]), confidence=1.0))
             entry.update(bpm=float(ov["bpm"]), src="edited")
             if "energy" in ov:
                 entry["energy"] = float(ov["energy"])
         elif loc:
+            votes.append(dict(source="local", value=float(loc["bpm"]), confidence=1.0))
             entry.update(bpm=loc["bpm"], src=loc.get("src") or "detected", alts=loc.get("alts") or [])
-        rep = dict(video=play_id, title=title, artist=artist, length=round(dur), bpm="", source="", flag="",
-                   matched="", preview_bpm="")
-        if ov is not None:
-            rep.update(source="yt_overrides.json")
-        elif loc:
-            rep.update(source="your local file", matched=f"{loc.get('title')} — {loc.get('artist')}")
-        dzr = None
-        if ov is None and not loc:
+            rep.update(matched=f"{loc.get('title')} — {loc.get('artist')}")
+        else:
             is_video = "OMV" in vtype or "UGC" in vtype
             dzr = itunes_bpm(vid, title, artist, dur, is_video, bpmcache, not args.no_preview)
-            if dzr.get("bpm") and args.bpm_key:
-                # second opinion from GetSongBPM's database for preview-only measurements
+            if dzr.get("bpm"):
+                votes.append(preview_vote(dzr))
+                entry["_feats"] = dzr.get("feats")
+                rep.update(flag=dzr.get("flag", ""), matched=dzr.get("match", ""), preview_bpm=dzr.get("pv_bpm") or "")
+            if not args.no_acousticbrainz:
+                ab = acousticbrainz_vote(title, artist, dur, bpmcache)
+                if ab:
+                    votes.append(ab)
+            if args.bpm_key:
                 g = getsongbpm(title, artist, args.bpm_key, bpmcache)
                 if g:
-                    r = related(dzr["bpm"], g["bpm"]) or related(g["bpm"], dzr["bpm"])
-                    if r:
-                        dzr = dict(dzr, src="itunes-preview" if dzr["src"] == "check" and "estimators" in dzr["flag"] else dzr["src"],
-                                   flag=dzr["flag"] + f"; GetSongBPM agrees ({g['bpm']:.0f})")
-                    else:
-                        dzr = dict(dzr, src="check", flag=f"preview {dzr['bpm']:.0f} vs GetSongBPM {g['bpm']:.0f} "
-                                   f"({dzr.get('ests', '')}): listen and fix")
-            if dzr.get("bpm"):
-                entry.update(bpm=dzr["bpm"], src=dzr["src"], alts=dzr.get("alts") or [], _feats=dzr.get("feats"))
-                rep.update(source="iTunes preview", flag=dzr.get("flag", ""), matched=dzr.get("match", ""),
-                           preview_bpm=dzr.get("pv_bpm") or "")
-            print(f"    {'%.0f BPM' % dzr['bpm'] if dzr.get('bpm') else 'no BPM'} · {dzr.get('flag') or dzr.get('why', '')}")
-        if entry["bpm"] is None and ov is None and not loc and args.bpm_key:
-            g = getsongbpm(title, artist, args.bpm_key, bpmcache)
-            if g:
-                vt = version_tags(title)
-                entry.update(bpm=g["bpm"], src="check" if vt else "getsongbpm")
-                rep.update(source="GetSongBPM", flag=f"GetSongBPM matched the title only, may be the original not the {'/'.join(sorted(vt))}" if vt else "")
-                if g.get("dance") is not None:
-                    entry["energy"] = round(min(1, max(0, g["dance"] / 100)), 2)
+                    vt = version_tags(title)
+                    votes.append(dict(source="getsongbpm", value=g["bpm"], confidence=0.5,
+                                      **({"doubt": f"GetSongBPM matched the title only, may be the original not the {'/'.join(sorted(vt))}"} if vt else {})))
+                    if g.get("dance") is not None and not dzr.get("bpm"):
+                        entry["energy"] = round(min(1, max(0, g["dance"] / 100)), 2)
+            if len(votes) == 1 and votes[0]["source"] != "preview":
+                votes[0]["doubt"] = votes[0].get("doubt") or f"no iTunes preview to check {votes[0]['source']} against"
+        entry["votes"] = votes
+        res0 = resolve_bpm(votes, None, rsettings)         # energy isn't known until the whole playlist is ranked
+        if res0:
+            apply_resolution(entry, res0)
+            if dzr is not None:
+                print(f"    {entry['bpm']:.0f} BPM · {res0['why']}")
+        elif dzr is not None:
+            print(f"    no BPM · {dzr.get('why', '')}")
+        rep["_dzr_why"] = (dzr or {}).get("why", "")
         if loc and not (ov and "energy" in ov):
             e = loc.get("energy_edit") if loc.get("energy_edit") is not None else loc.get("energy")
             if e is not None:
@@ -752,10 +840,12 @@ def main():
             print(f"    sections: {rep['sections']}")
         rep["bpm"] = entry["bpm"] or ""
         if entry["bpm"] is None:
-            rep["flag"] = (dzr or {}).get("why", "no BPM found")
+            rep["flag"] = rep.pop("_dzr_why", "") or "no BPM found"
             missing.append((play_id, title, artist))
         else:
+            entry["_rep"] = rep
             songs.append(entry)
+        rep.pop("_dzr_why", None)
         report.append(rep)
         BPM_CACHE.write_text(json.dumps(bpmcache, indent=1))      # save as we go: a long run can be resumed
 
@@ -769,6 +859,15 @@ def main():
             s["energy"] = round(sum(rk[f][j] for f in rk) / 3, 2)
     for s in songs:
         s.pop("_feats", None)
+    # Final decision per song, now that energy is known (high energy + slow reading -> double-time, and so on)
+    names = {"override": "yt_overrides.json", "local": "your local file", "preview": "iTunes preview",
+             "acousticbrainz": "AcousticBrainz", "getsongbpm": "GetSongBPM"}
+    for s in songs:
+        r, res = s.pop("_rep"), resolve_bpm(s["votes"], s["energy"], rsettings)
+        apply_resolution(s, res)
+        r.update(bpm=s["bpm"], source=names[res["source"]], votes=votes_text(s["votes"]), feel=res["feel"],
+                 check="check" if res["flag"] == "check" else "",
+                 flag="; ".join(x for x in (r["flag"] if res["source"] == "preview" else "", res["why"]) if x))
     Path(args.out).write_text(json.dumps({"version": 1, "source": "youtube", "playlist": pl.get("title", pid),
                                           "playlistId": pid, "songs": songs}))
     by = {}
@@ -781,7 +880,7 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(report[0].keys()) if report else ["video"])
         w.writeheader()
         w.writerows(report)
-    chk = [r for r in report if r["bpm"] and ("listen" in r["flag"] or "may be" in r["flag"])]
+    chk = [r for r in report if r["check"]]
     print(f"Details for every song: {rpath}")
     if chk:
         print(f"\n{len(chk)} to listen to (marked 'check' in the app's song list):")

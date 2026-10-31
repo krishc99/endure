@@ -18,10 +18,11 @@ Pick the songs in a YouTube Music playlist; Run DJ plays them in an embedded You
 pip3 install ytmusicapi librosa
 python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --out yt_library.json
 ```
-- BPM comes from, in order: `tools/yt_overrides.json` (your corrections); the same song in your local library (`dj_live.py`'s
-  cache, including beat/section data when it's the same recording); Apple's **iTunes Search API** (free, no key), which
-  finds the *same version* (title, artist, remix/acoustic/live tags and length must agree, so covers and remixes get
-  their own tempo) and measures its 30-second preview with librosa; then GetSongBPM if you pass `--bpm-key`. iTunes allows
+- BPM is decided by **voting** (see *BPM voting* below). Votes come from, in priority order: `tools/yt_overrides.json` (your
+  corrections); the same song in your local library (`dj_live.py`'s cache, including beat/section data when it's the same
+  recording); Apple's **iTunes Search API** (free, no key), which finds the *same version* (title, artist,
+  remix/acoustic/live tags and length must agree, so covers and remixes get their own tempo) and measures its 30-second
+  preview with librosa; **AcousticBrainz** (best effort, see below); then GetSongBPM if you pass `--bpm-key`. iTunes allows
   ~20 lookups a minute, so a first run of a big playlist takes several minutes.
   Install `essentia` (`pip3 install essentia`) for much better tempo on ballads and swing; each preview is measured by up
   to four estimators and songs where they disagree (including triplet 2/3 – 3/2 confusions) are marked **check**.
@@ -32,7 +33,8 @@ python3 tools/yt_library.py "https://music.youtube.com/playlist?list=PL..." --ou
 - **Hold a song while it still fits** (Settings, on by default): at a steady cadence the song isn't swapped for a
   slightly better match; it only changes after its last chorus, or sooner if your cadence moves out of its range.
 - Fix any song by ear on the phone: while it plays, tap **Tap the beat** 8+ times and **Save**.
-- `bpm_report.csv` lists every song's source, the version it matched and both measurements. Songs where they disagree are
+- `bpm_report.csv` lists every song's winning source, the version it matched, every vote (`votes` column), whether it feels
+  half/normal/double-time and a `check` column. Songs where sources disagree are
   marked **check** in the report and in the app's song list: listen, then fix with ½ / ×2 or add `{"videoId": 165}` to
   `tools/yt_overrides.json` and rerun. Songs with no BPM at all are listed at the end of the run.
 - Songs whose owner turned off embedding are swapped for another upload of the same song when one exists, otherwise listed and left out.
@@ -47,7 +49,10 @@ itself, and the first songs start playing within about a minute while the rest a
   preview's loudness, onset rate and brightness;
 - Apple allows ~20 lookups a minute, so a 100-song playlist takes about 5–6 minutes; songs already in your library are reused;
 - add as many playlists as you like: they all live in one library (*Play from* can pick one), and the whole library is saved
-  to `Documents/RunDJ/rundj_library.json` on the phone (restored automatically after a reinstall). *Refresh* re-syncs a playlist;
+  to `RunDJ/rundj_library.json`, in Documents where the phone allows it. Android 11+ usually does **not** let an app write to
+  Documents, so the file then stays inside the app's own storage, which is **deleted when you uninstall**. *Save library file*
+  therefore also opens the share sheet: save a copy to Files or Drive, and after a reinstall use *Import songs…* and pick that
+  file. *Refresh* re-syncs a playlist;
 - **Spotify** needs a free client ID and secret (developer.spotify.com → Create app), pasted in Settings. Only public playlists
   made by users can be read; Spotify-made mixes are blocked for new apps. **YouTube Music** import (YouTube's internal youtubei API) and
   **Apple Music** import (the public playlist page) are unofficial, so they sit behind the `devSources` flag (below);
@@ -73,6 +78,30 @@ VPN & Device Management → trust your Apple ID. Differences from Android: YouTu
 pages change YouTube's volume), local files still crossfade; no background mode (iPhones don't let one app drive another);
 no Health Connect. Phone motion, step counter, Manual and adding playlists by link all work; the library file is in
 Files → On My iPhone → Run DJ.
+
+### BPM voting
+Each song collects *votes* for its tempo, `{value, source, confidence}`: your own edit (`override`, ½ / ×2 / tap the beat /
+`yt_overrides.json`) > your local-file analysis of the same recording (`local`) > the iTunes preview measured with Essentia
+(`preview`) > AcousticBrainz > GetSongBPM (optional key, in Settings). The highest-priority vote is the tempo; the others only
+decide the flag: **agree**, or **check** when a source disagrees (including a vote that is exactly double or half), when the
+winning vote is itself doubtful (estimators disagree, maybe the wrong version), or when it is the only, unchecked source.
+The vote logic is `src/bpm.js` (mirrored in `tools/bpm_resolve.py`).
+
+*Feel.* A high-energy song detected slow is probably half-time of the real tempo, and a low-energy song detected fast the
+reverse. Energy is only known once the playlist is ranked, so after ranking: energy ≥ 0.7 and BPM < 100 becomes **double**
+(`bpmFeel: double`), energy ≤ 0.3 and BPM > 150 becomes **half**. Those four numbers are in *Settings* (changing one
+re-decides every song that has votes). If another source backs the change the song stays **agree**; if energy is the only
+evidence it is marked **check**. Your own edits are never touched. In the app a **check** song shows each source's vote and
+the reason under its title.
+
+*AcousticBrainz.* Looked up through MusicBrainz (artist + title + length, 1 request a second, with a User-Agent that names
+this repo). The project stopped accepting submissions in 2022 and its API is frozen but, as far as I could tell, still up, so
+many songs have no data and that is normal; after 3 failures in a row it is skipped for the rest of the session. Only the
+tempo and danceability are read for now (mood is not).
+
+*Songs analysed before voting* have no votes and keep their tempo until they are analysed again. Tests: `npm test`
+(the resolver, the AcousticBrainz/GetSongBPM lookups with a fake network, and the energy re-check) and
+`python3 -m unittest tools/test_bpm_resolve.py`.
 
 ### devSources: debug vs release
 Unofficial sources (YouTube Music's internal youtubei API, `tools/yt_library.py`'s ytmusicapi, Apple Music's public playlist

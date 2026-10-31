@@ -11,6 +11,7 @@
 import { CapacitorHttp, Capacitor } from '@capacitor/core';
 import { EssentiaWASM } from 'essentia.js/dist/essentia-wasm.es.js';
 import Essentia from 'essentia.js/dist/essentia.js-core.es.js';
+import { resolveBpm, DEFAULTS as BPM_DEFAULTS, LABEL as SRC_LABEL } from './bpm.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -315,7 +316,84 @@ async function itunesBpm(title, artist, dur, isVideo, country) {
   else if (m.alt) Object.assign(out, { src: 'check', flag: `could also be ${Math.round(m.alt[1])} (triplet/swing feel?) (${m.ests}): tap the beat to fix` });
   if (m.bpm < 110 && m.bpm * 2 <= 220) out.alts = [{ bpm: Math.round(m.bpm * 20) / 10, conf: 0.5 }];
   if (pv.extra) Object.assign(out, { src: 'check', flag: `matched ${pv.extra}, which may be a different version` });
+  // the same measurement as a vote: confidence = share of estimators that agree; anything that already said "check" is its doubt
+  out.vote = { value: m.bpm, source: 'preview', confidence: Math.round(m.agree / m.n * 100) / 100 };
+  if (out.src === 'check') out.vote.doubt = out.flag;
   return out;
+}
+
+// ------------------------------------------------------------------ BPM votes from other sources + the resolver
+let bpmSettings = { ...BPM_DEFAULTS };
+export const setBpmSettings = o => { bpmSettings = { ...BPM_DEFAULTS, ...(o || {}) }; };
+
+// Re-decide a song's tempo from its saved votes (and its current energy). Safe to call any time: your own edits
+// (src 'edited') always win and are never changed. Songs without votes (older libraries) are left alone.
+export function resolveMeta(m) {
+  if (!m || !m.votes || !m.votes.length) return m;
+  const votes = m.votes.filter(v => v.source !== 'override');
+  if (m.src === 'edited') votes.unshift({ value: m.bpm, source: 'override', confidence: 1 });
+  const r = resolveBpm(votes, { energy: m.energy, settings: bpmSettings });
+  if (!r) return m;
+  m.bpmFlag = r.flag; m.bpmFeel = r.bpmFeel; m.bpmWhy = r.why;
+  if (r.source === 'override') return m;
+  m.bpm = r.bpm;
+  m.src = r.flag === 'check' ? 'check' : SRC_LABEL[r.source];
+  m.flag = r.why;
+  if (r.source !== 'local') {                                  // alt tempos for the matcher: the other reading of this song
+    m.alts = r.bpmFeel !== 'normal' ? [{ bpm: Math.round(r.detected * 10) / 10, conf: 0.5 }]
+      : r.bpm < 110 && r.bpm * 2 <= 220 ? [{ bpm: Math.round(r.bpm * 20) / 10, conf: 0.5 }] : [];
+  }
+  return m;
+}
+
+// ---- GetSongBPM (optional, needs your free API key)
+export async function getsongbpmVote(title, artist, key) {
+  if (!key) return null;
+  const wantT = norm(title), wantA = firstArtist(artist);
+  const d = await getJSON('https://api.getsongbpm.com/search/?' + new URLSearchParams({ api_key: key, type: 'both', lookup: `song:${wantT} artist:${wantA}`, limit: '10' })).catch(() => null);
+  const hits = d && Array.isArray(d.search) ? d.search : [];
+  const score = h => (norm(h.title) === wantT ? 2 : 0) + (() => { const ha = norm(h.artist && h.artist.name); return wantA && ha && (ha.includes(wantA) || wantA.includes(ha)) ? 1 : 0; })();
+  let best = null;
+  for (const h of hits) if (!best || score(h) > score(best)) best = h;
+  const bpm = best && score(best) >= 2 ? parseFloat(best.tempo) : NaN;
+  if (!(bpm >= 40 && bpm <= 250)) return null;
+  const tags = [...versionTags(title)];
+  return { value: bpm, source: 'getsongbpm', confidence: 0.5, ...(tags.length ? { doubt: `GetSongBPM matched the title only; it may be the original, not the ${tags.join('/')}` } : {}) };
+}
+
+// ---- AcousticBrainz via MusicBrainz (best effort: the project stopped taking submissions in 2022, so many songs have
+// no data, and the service may go away; every failure here just means "no vote")
+const MB_UA = 'RunDJ/0.2 ( https://github.com/krishc99/endure )';
+let lastMb = 0, abFails = 0;
+async function mbSearch(title, artist) {
+  const wait = 1100 - (Date.now() - lastMb);              // MusicBrainz: 1 request per second
+  if (wait > 0) await sleep(wait);
+  lastMb = Date.now();
+  const rawT = title.replace(/[\(\[][^\)\]]*[\)\]]|\s-\s.*$/g, ' ').replace(/"/g, ' ').trim() || title;
+  const q = `recording:"${rawT}" AND artist:"${artist.split(/,|&/)[0].replace(/"/g, ' ').trim()}"`;
+  const r = await http('GET', 'https://musicbrainz.org/ws/2/recording?' + new URLSearchParams({ query: q, fmt: 'json', limit: '10' }), { headers: { 'User-Agent': MB_UA, Accept: 'application/json' } });
+  if (r.status >= 400 || !r.data) throw new Error('MusicBrainz HTTP ' + r.status);
+  return Array.isArray(r.data.recordings) ? r.data.recordings : [];
+}
+export async function acousticbrainzVote(title, artist, dur) {
+  if (abFails >= 3) return null;                          // looks down or blocked: stop wasting time this session
+  try {
+    let recs = (await mbSearch(title, artist)).map(x => ({ title: x.title || '', artist: (x['artist-credit'] || []).map(c => c.name || (c.artist && c.artist.name) || '').join(', '),
+      dur: (x.length || 0) / 1000, item: x }));
+    for (let tries = 0; tries < 3 && recs.length; tries++) {
+      const pv = pickVersion(recs, title, artist, dur, false);
+      if (!pv.item) break;
+      recs = recs.filter(c => c.item !== pv.item);
+      const r = await http('GET', `https://acousticbrainz.org/api/v1/${pv.item.id}/low-level`, { headers: { 'User-Agent': MB_UA } });
+      if (r.status === 404) continue;                     // no analysis for this recording: normal
+      if (r.status >= 400 || !r.data || typeof r.data !== 'object') { abFails++; return null; }
+      abFails = 0;
+      const rh = r.data.rhythm || {}, bpm = +rh.bpm;
+      if (bpm >= 40 && bpm <= 250) return { value: Math.round(bpm * 10) / 10, source: 'acousticbrainz', confidence: 0.6, mbid: pv.item.id,
+        ...(rh.danceability != null ? { danceability: Math.round(+rh.danceability * 100) / 100 } : {}) };
+    }
+  } catch (e) { abFails++; }
+  return null;
 }
 
 // ------------------------------------------------------------------ timed lyrics (LRCLIB) → per-bar structure
@@ -406,13 +484,15 @@ async function addSections(meta, isAudio) {
 }
 
 // ------------------------------------------------------------------ the whole thing
-// opts: {country, spotify:{id,secret}, known: Map(videoId|'t:'+title|artist → existing meta), cancelled: () => bool}
+// opts: {country, spotify:{id,secret}, getsongbpmKey, bpm: {energyHi,bpmLow,energyLo,bpmHigh}, local: Map(songKey → library entry of a
+//        local file), known: Map(videoId|'t:'+title|artist → existing meta), cancelled: () => bool}
 // cb:   {progress(text), song(meta), skipped(title, why)}
 export async function analyzePlaylist(link, opts, cb) {
   const p = typeof link === 'string' ? parseLink(link) : link;
   if (!p) throw new Error("That doesn't look like a YouTube Music, Spotify or Apple Music playlist link.");
   if (!DEV_SOURCES && p.source !== 'spotify') throw new Error((p.source === 'youtube' ? 'YouTube Music' : 'Apple Music') + ' playlist import is only available in debug builds for now.');
   const country = opts.country || 'IN';
+  if (opts.bpm) setBpmSettings(opts.bpm);
   cb.progress && cb.progress('Reading the playlist…');
   const pl = p.source === 'youtube' ? await ytmPlaylist(p.id, cb.progress) : p.source === 'spotify' ? await spotifyPlaylist(p.id, opts.spotify) : await applePlaylist(p);
   const plId = p.source + ':' + p.id;
@@ -438,11 +518,30 @@ export async function analyzePlaylist(link, opts, cb) {
       }
       if (opts.known && opts.known.get(vid)) { out.reused++; const k = { ...opts.known.get(vid) }; if (!k.bars && !k.sectionsTried) { await addSections(k, true); k.sectionsTried = 1; } cb.song(k, plId); continue; }
       if (await embeddable(vid) === false) { out.skipped.push([label, "the owner doesn't allow it to play inside apps"]); continue; }
-      // 2. BPM + energy features from the iTunes preview of the same version
-      const b = await itunesBpm(t.title, t.artist, dur, /OMV|UGC/.test(type), country);
-      if (!b.bpm) { out.skipped.push([label, b.why]); continue; }
-      const meta = { file: 'yt:' + vid, yt: vid, title: t.title, artist: t.artist, dur, bpm: b.bpm, src: b.src, alts: b.alts, energy: 0.5,
-        feats: b.feats, flag: b.flag, match: b.match, bars: null, wave: null, first_bar: null };
+      // 2. BPM votes. Your own analysis of the same recording (a local file) is enough on its own; otherwise ask the iTunes
+      //    preview (also gives the energy features), AcousticBrainz and, with a key, GetSongBPM at the same time.
+      const loc = opts.local && opts.local.get(songKey(t.title, t.artist));
+      const sameRec = !!(loc && loc.bpm && (!dur || !loc.dur || Math.abs(loc.dur - dur) <= 2));
+      const votes = [];
+      let b = { bpm: null }, ab = null;
+      if (sameRec) votes.push({ value: loc.bpm, source: 'local', confidence: 1 });
+      else {
+        let gs = null;
+        [b, ab, gs] = await Promise.all([
+          itunesBpm(t.title, t.artist, dur, /OMV|UGC/.test(type), country).catch(e => ({ bpm: null, why: 'iTunes: ' + (e.message || e) })),
+          acousticbrainzVote(t.title, t.artist, dur).catch(() => null),
+          getsongbpmVote(t.title, t.artist, opts.getsongbpmKey).catch(() => null)]);
+        if (b.vote) votes.push(b.vote);
+        if (ab) votes.push({ value: ab.value, source: ab.source, confidence: ab.confidence });
+        if (gs) votes.push(gs);
+        if (!votes.length) { out.skipped.push([label, b.why || 'no tempo from any source']); continue; }
+        if (votes.length === 1 && !b.vote) votes[0].doubt = `no iTunes preview to check ${votes[0].source} against`;
+      }
+      const meta = { file: 'yt:' + vid, yt: vid, title: t.title, artist: t.artist, dur, bpm: 0, src: '', alts: sameRec ? (loc.alts || []) : [],
+        energy: sameRec ? (loc.energy_edit != null ? loc.energy_edit : loc.energy != null ? loc.energy : 0.5) : 0.5,
+        feats: b.feats, match: b.match, votes, bars: null, wave: null, first_bar: null };
+      if (ab && ab.danceability != null) meta.danceability = ab.danceability;
+      resolveMeta(meta);                                                 // sets bpm, bpmFeel, bpmFlag (energy is re-checked once ranked)
       // 3. sections: LRCLIB's timed lyrics, else the plain fallback (enters about a quarter in)
       await addSections(meta, /ATV/.test(type));
       out.added++;
@@ -460,10 +559,11 @@ export function rankEnergy(metas) {
   if (fs.length < 2) return [];
   const rank = k => { const idx = fs.map((m, i) => i).sort((a, b) => fs[a].feats[k] - fs[b].feats[k]), r = new Array(fs.length); idx.forEach((i, pos) => r[i] = pos / (fs.length - 1)); return r; };
   const L = rank('loud'), R = rank('rate'), B = rank('bright'), changed = [];
-  fs.forEach((m, i) => { const e = Math.round((L[i] + R[i] + B[i]) / 3 * 100) / 100; if (e !== m.energy) { m.energy = e; changed.push(m); } });
+  fs.forEach((m, i) => { const e = Math.round((L[i] + R[i] + B[i]) / 3 * 100) / 100; if (e !== m.energy) { m.energy = e; resolveMeta(m); changed.push(m); } });
   return changed;
 }
 
+export { votesText } from './bpm.js';
 export const songKey = (title, artist) => 't:' + norm(title) + '|' + firstArtist(artist);
 
-export const _test = { setHttp: f => { httpOverride = f; }, setDevSources: v => { DEV_SOURCES = !!v; }, ytmTimedLyrics, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };
+export const _test = { setHttp: f => { httpOverride = f; }, resetAb: () => { abFails = 0; lastMb = 0; }, itunesBpm, setDevSources: v => { DEV_SOURCES = !!v; }, ytmTimedLyrics, norm, versionTags, ytmItem, ytmPlaylist, ytmSearchSongs, applePlaylist, spotifyPlaylist, lrclib };

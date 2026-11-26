@@ -190,30 +190,77 @@ function setSrc(v){
   render();
 }
 
-// ---- live source 1: phone motion (accelerometer), instant. See motion.js.
-let mDet=null,mTimer=null,mWall=0;
+// ---- live source 1: phone motion (accelerometer), instant. Each foot landing is a step (StepTracker in motion.js):
+// it feeds the cadence, flashes the dot, and lets beat lock pull the song's beats onto your footfalls.
+let mDet=null,mTimer=null,mWall=0,dotT=null;
 function onMotion(e){
   const a=e.accelerationIncludingGravity;if(!a||a.x==null||!mDet)return;
-  mWall=performance.now();mDet.push(e.timeStamp||mWall,a.x,a.y,a.z);
+  const now=performance.now();mWall=now;
+  let t=e.timeStamp;if(!(t>0)||Math.abs(t-now)>5000)t=now;   // some WebViews stamp events with wall-clock time
+  mDet.push(t,a.x,a.y,a.z);
+  if(rec)recSample(t,a);
+}
+function onStep(t,virtual){
+  if(!virtual&&typeof stepAt==='function')stepAt(t);
+  if(rec)rec.steps.push([Math.round(t-rec.t0),virtual?1:0]);
+  const d=$('stepdot');if(d){d.style.background=virtual?'var(--q)':'var(--acc)';clearTimeout(dotT);dotT=setTimeout(()=>{d.style.background='var(--bd)'},120)}
 }
 async function motionStart(){
-  mDet=new MotionCadence({minStd:+$('mmin').value||0.5});mWall=0;
+  mDet=new StepTracker({minAmp:+$('mmin').value||0.5});mDet.onStep=onStep;mWall=0;
   try{if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
     if(await DeviceMotionEvent.requestPermission()!=='granted'){say('livestatus','Motion permission denied.');return}}}catch(e){}
   window.addEventListener('devicemotion',onMotion);say('livestatus','Waiting for motion data…');
   mTimer=setInterval(motionTick,500);
 }
-function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null}
+function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null;if(rec)recStop()}
 function motionTick(){
   if(!mDet)return;
-  mDet.minStd=+$('mmin').value||0.5;
+  mDet.minAmp=+$('mmin').value||0.5;
   if(!mWall||performance.now()-mWall>2500){motionCad=null;
     say('livestatus',mWall?'The motion sensor stopped sending data.':'No motion data yet. This phone or WebView may not expose the accelerometer.');render();return}
-  const c=mDet.cadence();motionCad=c;
-  say('livestatus',c==null?'Collecting a few seconds of motion…':c===0?'Not moving with steps (cadence 0)':
-    `${Math.round(c)} steps/min · live from phone motion · signal ${(mDet.quality||0).toFixed(2)}`);
+  const c=mDet.cadence(performance.now());motionCad=c;
+  say('livestatus',c==null?(mDet.count?`${mDet.count} steps · finding your rhythm…`:'Waiting for your first steps…'):c===0?'Stopped (cadence 0)':
+    `${Math.round(c)} steps/min · ${mDet.count} steps`+(typeof lockMsg!=='undefined'&&lockMsg?' · '+lockMsg:''));
+  if(rec){rec.cad.push([Math.round(performance.now()-rec.t0),c==null?null:Math.round(c*10)/10,cur?cur.title:null,Math.round((AU[ai].playbackRate||1)*1000)/1000]);recTick()}
   render();
 }
+
+// ---- run recorder: raw motion + the steps and cadence the app found, saved as a JSON file to share.
+// Replaying these (tools/replay_run.mjs) is how the step detector gets tuned to real phones and real running.
+let rec=null;
+const REC_MAX=20*60*1000;                                       // stops by itself after 20 minutes
+function recSample(t,a){rec.m.push([Math.round(t-rec.t0),Math.round(a.x*1000)/1000,Math.round(a.y*1000)/1000,Math.round(a.z*1000)/1000])}
+function recStart(){
+  if(src!=='motion'){say('recstatus','Switch the cadence source to Phone motion first.');return}
+  rec={v:1,app:'Run DJ',kind:'motion-recording',started:new Date().toISOString(),carry:$('carry').value,ua:navigator.userAgent,
+    settings:{mmin:+$('mmin').value,bl:$('bl').checked,lat:+$('lat').value},t0:performance.now(),m:[],steps:[],cad:[],marks:[]};
+  $('recbtn').textContent='■ Stop & save';$('recmark').style.display='';$('carry').disabled=true;
+  say('recstatus','Recording. Run normally: include a speed-up, a slow-down and a short stop. Tap Mark at any change.');
+}
+function recTick(){
+  const s=(performance.now()-rec.t0)/1000;
+  say('recstatus',`Recording ${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')} · ${rec.steps.length} steps · ${rec.marks.length} marks`);
+  if(performance.now()-rec.t0>REC_MAX)recStop();
+}
+async function recStop(){
+  if(!rec)return;const r=rec;rec=null;
+  $('recbtn').textContent='● Record run';$('recmark').style.display='none';$('carry').disabled=false;
+  r.ended=new Date().toISOString();
+  const name=`rundj_run_${r.carry}_${r.started.slice(0,16).replace(/[-:T]/g,'')}.json`,data=JSON.stringify(r);
+  const FS=native&&native.Filesystem,SH=native&&native.Share;
+  try{
+    if(FS&&SH){
+      await FS.writeFile({path:name,data,directory:native.Directory.Cache,encoding:native.Encoding.UTF8});
+      const {uri}=await FS.getUri({path:name,directory:native.Directory.Cache});
+      await SH.share({title:'Run DJ recording',text:`Run DJ motion recording (${r.carry})`,files:[uri],dialogTitle:'Send the recording'});
+    }else{
+      const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type:'application/json'}));a.download=name;document.body.appendChild(a);a.click();a.remove();
+    }
+    say('recstatus',`Saved ${name} (${Math.round(data.length/1024)} KB, ${r.steps.length} steps).`);
+  }catch(e){say('recstatus','Could not save the recording: '+(e.message||e))}
+}
+$('recbtn').onclick=()=>rec?recStop():recStart();
+$('recmark').onclick=()=>{if(rec){rec.marks.push(Math.round(performance.now()-rec.t0));recTick()}};
 
 // ---- live source 2: the phone's hardware step counter (Android TYPE_STEP_COUNTER)
 const PED=native&&native.Pedometer;let pedOn=false,pedSamples=[],pedHandle=null,pedTimer=null;
@@ -305,7 +352,7 @@ const votesLine=t=>{                   // under the title of a "check" song: wha
   const A=window.RunDJAnalyzer;if(!A||t.src!=='check'||!t.votes||!t.votes.length)return '';
   return `<br><span class="small">${esc(A.votesText(t.votes,{bpm:t.bpm,bpmFeel:t.bpmFeel||'normal',flag:'check'}))}${t.bpmWhy?' — '+esc(t.bpmWhy):''}</span>`};
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','bl','stretch','lat','pxf','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 

@@ -39,7 +39,12 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <div class="row seg"><button id="src_manual" class="p">Manual</button><button id="src_motion">Phone motion</button><button id="src_ped">Step counter</button><button id="src_hc" class="andonly">Health Connect</button></div>
   <div class="row" style="margin-top:10px"><span class="big" id="bpmv">150</span><span class="small" id="cadsub">steps / BPM · manual</span></div>
   <input type="range" id="bpm" min="60" max="190" value="150">
-  <div id="livebox" style="display:none;margin-top:8px"><div class="small" id="livestatus">—</div></div>
+  <div id="livebox" style="display:none;margin-top:8px"><div class="small" style="display:flex;gap:8px;align-items:center"><span id="stepdot" style="width:12px;height:12px;border-radius:50%;background:var(--bd);flex:none;transition:background .08s"></span><span id="livestatus">—</span></div>
+    <div id="recbox" style="margin-top:8px;border-top:1px solid var(--bd);padding-top:8px">
+      <div class="small">Record a run to improve step detection: the raw motion and the steps the app counted, saved to a file you can share.</div>
+      <div class="row" style="justify-content:flex-start;margin-top:6px"><select id="carry"><option value="pocket">Phone in pocket</option><option value="hand">In hand, arm swinging</option><option value="held">Held steady (reading)</option><option value="armband">Armband / belt</option><option value="other">Other</option></select>
+        <button id="recbtn">● Record run</button><button id="recmark" style="display:none">Mark</button></div>
+      <div class="small" id="recstatus" style="margin-top:4px"></div></div></div>
   <div id="hcbox" style="display:none;margin-top:8px">
     <div class="row" style="justify-content:flex-start"><button id="hcconnect">Connect</button><button id="hctest">Test read</button></div>
     <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
@@ -83,7 +88,7 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Step window (s)<input type="number" id="hcwin" value="120"></label>
   <label>Treat data as stopped after (s)<input type="number" id="hcstale" value="240"></label>
   <label>Health Connect poll (s)<input type="number" id="hcpoll" value="10"></label>
-  <label>Motion sensitivity (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
+  <label>Motion sensitivity: smallest step jolt (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
   <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>
   <label>iTunes store country<input type="text" id="country" value="IN" maxlength="2"></label>
   <label>Spotify client ID<input type="text" id="spid" placeholder="for Spotify links"></label>
@@ -97,8 +102,10 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
   <label class="ck"><input type="checkbox" id="hold" checked> Hold a song while it still fits</label>
-  <label class="ck"><input type="checkbox" id="push" checked> When every song at your pace has played, nudge the tempo up</label>
-  <label>Nudge up by at most (BPM)<input type="number" id="pushmax" value="8"></label>
+  <label class="ck"><input type="checkbox" id="bl" checked> Beat lock: the song follows your steps (own songs)</label>
+  <label>Follow your pace by up to (%)<input type="number" id="stretch" value="6" min="0" max="10"></label>
+  <label>Beat offset (ms)<input type="number" id="lat" value="80" step="10"></label>
+  <label>Pace-change fade (s)<input type="number" id="pxf" value="3" step="0.5" min="1" max="4"></label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
   <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
@@ -201,6 +208,11 @@ class Deck{
     return this.p&&this._loaded===this.vid&&this.p.getDuration?(this.p.getDuration()||0):0;
   }
   get ended(){return this.mode==='yt'?this._ended:this.au.ended}
+  // speed: own songs only (beat lock). The YouTube player only offers coarse steps, so it stays at 1×.
+  get playbackRate(){return this.mode==='yt'?1:this.au.playbackRate}
+  set playbackRate(v){if(this.mode!=='yt'){this.au.preservesPitch=true;this.au.playbackRate=v}}
+  get defaultPlaybackRate(){return this.mode==='yt'?1:this.au.defaultPlaybackRate}
+  set defaultPlaybackRate(v){if(this.mode!=='yt')this.au.defaultPlaybackRate=v}
   get volume(){return this.mode==='yt'||this.gain?this._vol:this.au.volume}
   set volume(v){
     this._vol=v;
@@ -233,9 +245,11 @@ class Deck{
   }
 }
 const AU=[new Deck(0),new Deck(1)];
+let stepT=[],pc=0,lockErr=[],outSince=null,curMult=1,rateCur=1,songsSincePush=0,pushState=null,lockMsg='';
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,played=new Map(),playSeq=0,cadHist=[],pushSong=null,pushBase=0,nudgeLog=null;
-const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:$('push').checked,pushMax:+$('pushmax').value,xf:+$('xf').value,
+const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:true,pushMax:5,bl:$('bl').checked,stretch:+$('stretch').value,lat:+$('lat').value,pxf:+$('pxf').value,xf:+$('xf').value,
   ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
+const cadNow=()=>cadence();
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
 const logOnce=(k,m)=>{if(k!==lastKey){lastKey=k;log(m)}};
@@ -243,35 +257,33 @@ const name=s=>s.artist?`${s.title} — ${s.artist}`:s.title;
 
 // How can this song fit cadence c? Tries 1:1 first; half-time (runner takes 2 steps per beat) costs a penalty.
 // cost = distance + penalties - energy bonus. null if nothing is within tolerance.
-function match(s,c){
+function match(s,c,tolO){
   if(s.bad)return null;
-  const st=S();let r=null;
+  const st=S(),tol=tolO==null?st.tol:tolO;let r=null;
   const cands=[{b:s.bpm,pen:0,alt:false}];
   if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)cands.push({b:a.bpm,pen:1,alt:true});
   const modes=[[1,0,'1:1']];if(st.half)modes.push([2,st.htpen,'half-time']);
   for(const k of cands)for(const [mult,pen,mode] of modes){
     const diff=Math.abs(k.b*mult-c);
-    if(diff<=st.tol){const cost=diff+k.pen+pen-st.ew*s.energy;
+    if(diff<=tol){const cost=diff+k.pen+pen-st.ew*s.energy;
       if(!r||cost<r.cost)r={cost,diff,tempo:k.b,mode:mode+(k.alt?', alt tempo':'')}}
   }
   return r;
 }
-// Nudge: songs NOT yet played that are a little faster than your pace (just above the tolerance, up to +pushMax).
-function nudgeCandidates(c,excl){
+// Push: a song 3-5 BPM faster than your pace (any not played recently), offered every third song when you're steady
+function pushCandidates(c,excl){
   const st=S(),out=[];
   for(const s of songs){
-    if(s===excl||s.bad||lastPlayed(s)>=0)continue;
+    if(s===excl||s.bad)continue;
     const ks=[{b:s.bpm,pen:0}];if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)ks.push({b:a.bpm,pen:1});
     let best=null;
     for(const k of ks)for(const [mult,pen,mode] of (st.half?[[1,0,'1:1'],[2,st.htpen,'half-time']]:[[1,0,'1:1']])){
-      const e=k.b*mult,up=e-c;
-      if(up>st.tol&&up<=st.tol+st.pushMax){const m={cost:up+k.pen+pen-st.ew*s.energy,diff:up,tempo:k.b,mode:mode+', tempo nudge',push:true};if(!best||m.cost<best.cost)best=m}
+      const up=k.b*mult-c;
+      if(up>=3&&up<=5.5){const m={cost:Math.abs(up-4)+k.pen+pen-st.ew*s.energy,diff:up,tempo:k.b,mode:mode+', push',push:true};if(!best||m.cost<best.cost)best=m}
     }
     if(best)out.push({s,m:best});
   }
-  if(!out.length)return null;
-  const lo=Math.min(...out.map(x=>x.m.diff)),near=out.filter(x=>x.m.diff<=lo+1.5);   // the smallest step up
-  return near.reduce((a,b)=>b.m.cost<a.m.cost?b:a);
+  return out;
 }
 // Your pace over the last minute: steady (range within 5) and not drifting down
 function paceTrend(){
@@ -295,6 +307,59 @@ function highRuns(s){   // stretches of ≥3 bars with energy ≥0.75: the choru
   return s._hr=runs.filter(r=>r[1]-r[0]>=3).map(r=>({start:s.bars[r[0]][0],end:s.bars[r[1]][0]}));
 }
 const dirOf=x=>{const r=eff(x.m)/curEff;return r>1.03?'up':r<.97?'down':'same'};
+const drv=b=>b[4]==null?lv(b):b[4];                            // bar[4]: how much drums/instruments are playing
+
+// ---- beat lock. The song's tempo follows your cadence (within ±stretch %), and each step nudges it so the next
+// beat lands on your next footfall. Own songs only (YouTube's player can't change speed smoothly) and only when the
+// song has beat data. Not during a push: that song is meant to be faster than you.
+const lockable=s=>!!(s&&!s.yt&&s.bars&&s.bars.length>4);
+const isPush=()=>!!(pushState&&cur===pushState.s);
+function targetRate(x,c){                                       // playback speed that puts this song at cadence c
+  const st=S();if(!st.bl||!x||x.s.yt||x.m.push||!c)return 1;
+  const r=c/eff(x.m),lim=st.stretch/100;return Math.min(1+lim,Math.max(1-lim,r));
+}
+function applyRate(){
+  const a=AU[ai];if(!cur||cur.yt||fading){return}
+  const st=S(),c=cadNow(),base=isPush()?1:targetRate({s:cur,m:{tempo:curEff/curMult,mode:curMult===2?'half-time':'1:1'}},c);
+  const lim=st.stretch/100+0.04,r=Math.min(1+lim,Math.max(1-lim,base*(isPush()||!st.bl?1:1+pc)));
+  if(Math.abs(r-(a.playbackRate||1))>0.0015){a.playbackRate=r}
+  rateCur=a.playbackRate||1;
+}
+// how far (in steps, -0.5..0.5) song position p is from the nearest step-beat; + = the music is ahead of your foot
+function phaseErr(s,p){
+  const B=s.bars;if(!B||B.length<2)return null;
+  const lens=[];for(let i=1;i<B.length;i++)lens.push(B[i][0]-B[i-1][0]);lens.sort((x,y)=>x-y);
+  const bar=lens[lens.length>>1],ta=240/bar,n=Math.max(1,Math.round(curEff/ta));   // steps per beat (2 = half-time, double-time)
+  let i=0;while(i<B.length-1&&B[i+1][0]<=p)i++;
+  const t0=B[i][0],L=i<B.length-1?B[i+1][0]-t0:bar,u=(p-t0)/(L/(4*n));
+  return u-Math.round(u);
+}
+// called by the phone each time a foot lands (t = performance.now() of the landing)
+function stepAt(t){
+  stepT.push(t);if(stepT.length>16)stepT.shift();
+  const st=S();if(!st.bl||!cur||fading||isPush()||!lockable(cur))return;
+  const a=AU[ai];if(a.paused)return;
+  const r=a.playbackRate||1,p=a.currentTime-((performance.now()-t)/1000+st.lat/1000)*r;   // what you heard as the foot landed
+  const e=phaseErr(cur,p);if(e==null)return;
+  lockErr.push(e);if(lockErr.length>8)lockErr.shift();
+  pc=Math.max(-0.04,Math.min(0.04,0.8*pc-0.12*e));             // music ahead -> slow down a touch, behind -> speed up
+  applyRate();
+  const ms=Math.round(lockErr.reduce((x,y)=>x+Math.abs(y),0)/lockErr.length*60000/cadNow());
+  lockMsg=lockErr.length>=4?`beat lock ±${ms} ms`:'';
+}
+// Entry for speeding up: a phrase start where the drums and instruments are coming in, not a stripped-down
+// (e.g. vocals-only) stretch. Earliest one nearly as good as the best, so we don't skip half the song for it.
+function buildEntry(s){
+  const B=s.bars,lim=.7*(s.dur||1e9),val=x=>0.5*lv(x)+0.5*drv(x),avg=a=>a.reduce((p,x)=>p+val(x),0)/a.length,c=[];
+  for(let i=0;i<B.length;i++){
+    const b=B[i];if(b[2]!==1||b[0]>lim)continue;
+    const nx=B.slice(i,i+4),pv=B.slice(Math.max(0,i-4),i);if(nx.length<2)continue;
+    const after=avg(nx),before=pv.length?avg(pv):after*0.6,thin=Math.min(drv(nx[0]),drv(nx[1]))<0.35;
+    c.push({t:b[0],sc:after+0.5*Math.max(0,after-before)-(thin?0.5:0)});
+  }
+  if(!c.length)return null;
+  const best=Math.max(...c.map(x=>x.sc));return c.find(x=>x.sc>=best-0.1*Math.abs(best)).t;
+}
 
 // ---- choosing the next song: every song that fits your pace is a candidate. Songs not yet played this run come first,
 // then the one played longest ago, so you hear every fitting song before any repeats. Among equals: the near-best match.
@@ -318,7 +383,8 @@ function pickEntry(s,Lo,dir,xf){
     if(dir==='down'){
       const tg=Math.max(.2,Lo-.25),c=s.bars.filter(b=>b[2]===1&&b[0]<=.7*(s.dur||1e9));
       if(c.length){t=c.reduce((a,b)=>Math.abs(lv(b)-tg)<Math.abs(lv(a)-tg)-1e-9?b:a)[0];why='a calmer section'}
-    }else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
+    }else if(dir==='up'){const e=buildEntry(s);if(e!=null){t=e;why='where the drums and instruments come in'}}
+    else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
   }else if(dir!=='down'&&(s.dur||0)>90){   // no section data: skip the intro and first verse instead of starting cold
     const bar=240/(s.bpm||120);t=Math.round(Math.min(45,.25*s.dur)/bar)*bar;why='about a quarter in (no section data)'}
   const sp=t-xf;return {tAlign:t,startPos:Math.max(0,sp),delay:Math.max(0,-sp),why};
@@ -346,11 +412,27 @@ function pickExit(s,el,st,dir,rot){
 }
 // songs with no beat/section data: leave at the earliest allowed moment (rotation: about 3/4 through)
 const plainExit=(el,st,rot)=>{const tmin=Math.max(base+st.min,el+st.xf+0.3);return rot?Math.max(tmin,.75*(AU[ai].duration||cur.dur||0)):tmin};
-function makePlan(x,el,st){
-  const dir=dirOf(x),hasBars=cur.bars&&cur.bars.length;
-  const T=hasBars?pickExit(cur,el,st,dir,x.rot):plainExit(el,st,x.rot);
-  if(T==null||T>=(AU[ai].duration||cur.dur||1e9)-st.xf-1)return null;
-  return {T,fadeAt:T-st.xf,x,dir,rot:!!x.rot,entry:pickEntry(x.s,hasBars?lv(barAt(cur,T)):.5,dir,st.xf)};
+// next beat of the current song at or after media time t (the bar grid split in 4), or t itself without beat data
+function nextBeat(s,t){
+  const B=s.bars;if(!B||B.length<2)return t;
+  for(let i=0;i<B.length;i++){const L=(i<B.length-1?B[i+1][0]:B[i][0]+(B[i][0]-B[i-1][0]))-B[i][0];
+    for(let k=0;k<4;k++){const bt=B[i][0]+k*L/4;if(bt>=t)return bt}}
+  return t;
+}
+// fast: your pace changed, so the fade starts on the next beat and lasts pxf seconds (done well inside 5 s).
+// Tforce: leave at this point (the end of a pushed song's chorus).
+function makePlan(x,el,st,fast,Tforce){
+  const dir=dirOf(x),hasBars=cur.bars&&cur.bars.length,r=rateCur||1;
+  const fx=fast?Math.min(st.pxf,st.xf)||3:st.xf;
+  let T,fadeAt;
+  if(fast){fadeAt=hasBars?nextBeat(cur,el+0.05):el+0.05;T=fadeAt+fx*r}
+  else{
+    T=Tforce!=null?Math.max(Tforce,el+fx*r+0.3):(hasBars?pickExit(cur,el,st,dir,x.rot):plainExit(el,st,x.rot));
+    if(T==null||T>=(AU[ai].duration||cur.dur||1e9)-fx-1)return null;
+    fadeAt=T-fx*r;
+  }
+  const rn=targetRate(x,cadNow());
+  return {T,fadeAt,fx,fast:!!fast,forced:Tforce!=null,x,dir,rot:!!x.rot,entry:pickEntry(x.s,hasBars?lv(barAt(cur,T)):.5,dir,fx*rn)};
 }
 
 // Pre-load the next song on the idle player so the fade doesn't wait on the network/decoder
@@ -363,31 +445,36 @@ function fadeStep(){   // time-based, so the fade ends exactly xf seconds after 
   fadeNew.volume=gi;fadeOld.volume=go;
   if(f>=1){clearInterval(fadeT);fading=false;fadeOld.pause()}
 }
-function crossfade(x,entry){
-  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?S().xf:0,old=AU[ai];ai=1-ai;const n=AU[ai],e=entry||{startPos:0,delay:0};   // first song starts at full volume
+function crossfade(x,entry,fx){
+  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?(fx!=null?fx:S().xf):0,old=AU[ai];ai=1-ai;const n=AU[ai],e=entry||{startPos:0,delay:0};   // first song starts at full volume
   if(!(prepId===x.s.id&&prepSp===e.startPos)){
     n.src=srcFor(x.s);
     if(e.startPos>0.05)n.addEventListener('loadedmetadata',()=>{n.currentTime=e.startPos},{once:true});
   }
   prepId=null;n.volume=xf>0?0:1;
+  const rn=targetRate(x,cadNow());if(!x.s.yt){n.defaultPlaybackRate=rn;n.playbackRate=rn}
   const go=()=>n.play().catch(err=>log('⚠ playback blocked: '+err.message));
   e.delay>0?setTimeout(go,e.delay*1000):go();
   clearInterval(fadeT);fading=false;
   if(xf>0){fadeNew=n;fadeOld=old;fadeLen=xf;fadeStart=performance.now();fading=true;fadeT=setInterval(fadeStep,40)}else old.pause();
-  cur=x.s;played.set(songKey(x.s),++playSeq);curEff=eff(x.m);if(x.m.push){pushSong=x.s;pushBase=cadence()}else pushSong=null;
+  cur=x.s;played.set(songKey(x.s),++playSeq);curEff=eff(x.m);curMult=x.m.mode.startsWith('half')?2:1;rateCur=x.s.yt?1:(n.playbackRate||1);pc=0;lockErr=[];lockMsg='';outSince=null;
+  if(x.m.push){                                                 // the push: remember your pace, and where its chorus ends
+    const sp=e.startPos||0,hr=x.s.bars&&x.s.bars.length?highRuns(x.s):[],ch=hr.find(h=>h.end>sp+8);
+    pushState={s:x.s,base:cadNow(),target:eff(x.m),chorusEnd:ch?ch.end:sp+60};songsSincePush=0;
+  }else{pushState=null;songsSincePush++}
   pend=null;keep=null;boundary=null;plan=null;disarm();base=e.startPos;lastEl=e.startPos;lastKey='';
 }
 function disarm(){clearInterval(armT);armT=null}
 function armCheck(){   // 25 ms poll while a swap is planned, so the fade starts on time
   if(!plan||!cur){disarm();return}
   if(fading)return;
-  if(AU[ai].currentTime>=plan.fadeAt){const p=plan;log(`🔀 fading to ${name(p.x.s)} (${desc(p.x.m)}), fade ends at ${fmt(p.T)}; it enters at ${p.entry.why}`);crossfade(p.x,p.entry);render()}
+  if(AU[ai].currentTime>=plan.fadeAt){const p=plan;log(`🔀 fading to ${name(p.x.s)} (${desc(p.x.m)}) over ${p.fx}s; it enters at ${p.entry.why}`);crossfade(p.x,p.entry,p.fx);render()}
 }
 function arm(){if(!armT)armT=setInterval(armCheck,25)}
 const dirTxt={same:'same tempo',up:'tempo up',down:'tempo down'};
 
 function loop(){
-  const b=cadence(),st=S();
+  const b=cadNow(),st=S();
   cadHist.push([performance.now(),b]);while(cadHist.length&&performance.now()-cadHist[0][0]>90000)cadHist.shift();
   if(!cur){
     const cs=candidates(b,null),bc=bestOf(cs);
@@ -397,25 +484,36 @@ function loop(){
   }
   const a=AU[ai],el=a.currentTime,len=a.duration||cur.dur||1e9;
   if(fading){lastEl=el;return render()}   // never start a second fade on top of a running one
-  const tr=paceTrend();
-  let mc=match(cur,b);
-  // a nudged (faster) song stays "fitting" while you adapt to it, unless you slow down
-  if(!mc&&cur===pushSong&&!tr.slowing&&b>=pushBase-2){const e=pushSong.bpm;mc={cost:Math.abs(e-b),diff:Math.abs(e-b),tempo:e,mode:'tempo nudge'}}
+  const tr=paceTrend(),now=performance.now();
+  // The playing song stays while your pace is within what it can follow (beat lock stretches it by up to ±stretch %).
+  // A pushed song stays while you keep at least the pace you had when it started.
+  let mc=match(cur,b,Math.max(st.tol,st.bl&&!cur.yt?st.stretch/100*b:0)),forceT=null;
+  if(isPush()){
+    if(b>=pushState.target-2||b>=pushState.base+2.5){log(`💪 you sped up to ${Math.round(b)}: staying with ${cur.title}`);pushState=null}
+    else if(b<pushState.base-4){log(`↘ you slowed down: back to matching your pace`);pushState=null;mc=null}
+    else{mc=mc||{cost:0,diff:Math.abs(pushState.target-b),tempo:curEff/curMult,mode:'push'};forceT=pushState.chorusEnd}
+  }
   const ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
-  // hold: while the playing song still fits your cadence, don't jump to a 'slightly better' one; it plays to its last chorus
-  const needSwap=bc&&(!ok||(!st.hold&&bc.m.cost+st.mar<=mc.cost));
-  let pool=null,rot=false;
-  if(needSwap)pool=cs;                                  // current no longer fits (or, with Hold off, another fits clearly better)
-  else if(st.rotate&&ok&&bc){pool=cs;rot=true}          // steady tempo: after the last chorus, on to another fitting song
-  // every song at this pace has played and you're running steadily: the next one is a little faster instead of a repeat
-  if(!needSwap&&st.rotate&&ok&&st.push&&tr.steady&&cs.every(x=>lastPlayed(x.s)>=0)){
-    const nu=nudgeCandidates(b,cur);
-    if(nu){pool=[nu];rot=true;if(nudgeLog!==songKey(nu.s)){nudgeLog=songKey(nu.s);log(`⏫ every song at ${Math.round(b)} has played: next is a little faster, ${name(nu.s)} (${Math.round(nu.m.tempo*(nu.m.mode.startsWith('half')?2:1))})`)}}
+  // a change of pace counts once the song has been out of range for 1 s; then the switch happens right away
+  if(ok)outSince=null;else if(outSince==null)outSince=now;
+  const changed=!ok&&now-outSince>=1000;
+  let pool=null,rot=false,fast=false;
+  if(changed&&bc){pool=cs;fast=true}                         // your pace changed: switch now (within ~4 s)
+  else if(!ok&&bc&&!st.hold)pool=cs;
+  else if(forceT!=null){pool=cs.length?cs:null;rot=true}    // you held your pace through a push: back to matching after its chorus
+  else if(ok&&bc&&!st.hold&&bc.m.cost+st.mar<=mc.cost)pool=cs;
+  else if(st.rotate&&ok&&bc){                                 // steady: after the last chorus, on to another fitting song
+    const close=cs.filter(x=>x.m.diff<3);pool=close.length?close:cs;rot=true}   // (a faster song is kept for the push turns)
+  // every third song at a steady pace: one that's 3-5 BPM faster, to push you on
+  if(rot&&forceT==null&&!isPush()&&songsSincePush>=2&&tr.steady){
+    const pc2=pushCandidates(b,cur);
+    if(pc2.length){pool=pc2;if(nudgeLog!==Math.round(b)){nudgeLog=Math.round(b);log(`⏫ steady at ${Math.round(b)}: next song is a little faster to push you on`)}}
   }
   if(pool&&pool.length){
-    if(!(keep&&keep.cur===cur&&keep.rot===rot&&pool.some(x=>x.s===keep.s)))keep={cur,rot,s:choose(pool).s};   // pick once, stay stable
-    pend=pool.find(x=>x.s===keep.s);pend.rot=rot;
+    if(!(keep&&keep.cur===cur&&keep.rot===rot&&keep.fast===fast&&pool.some(x=>x.s===keep.s)))keep={cur,rot,fast,s:choose(pool).s};   // pick once, stay stable
+    pend=pool.find(x=>x.s===keep.s);pend.rot=rot;pend.fast=fast;
   }else{pend=null;keep=null}
+  applyRate();
   if(a.ended||el>=len-st.xf-0.5){   // song is about to end anyway: fade so it finishes with the file
     let nx=pend;plan=null;disarm();
     if(!nx)nx=choose(cs)||(ok?{s:cur,m:mc}:null);         // repeat the same song only if nothing else fits
@@ -425,7 +523,10 @@ function loop(){
     return render();
   }
   if(!pend){plan=null;disarm();boundary=null;if(!ok)logOnce('out',`⚠ nothing fits ${b} BPM, playing out ${cur.title}`);lastEl=el;return render()}
-  if(!plan||plan.x.s!==pend.s||plan.rot!==!!pend.rot){plan=makePlan(pend,el,st);if(plan)prep(plan.x,plan.entry)}else plan.x=pend;
+  if(!plan||plan.x.s!==pend.s||plan.rot!==!!pend.rot||plan.fast!==!!pend.fast||plan.forced!==(forceT!=null)){
+    plan=makePlan(pend,el,st,fast,forceT);if(plan)prep(plan.x,plan.entry);
+    if(plan&&fast)log(`⚡ pace changed to ${Math.round(b)}: switching to ${name(pend.s)} now (${plan.fx}s fade)`);
+  }else plan.x=pend;
   if(plan){
     boundary=plan.T;arm();
     logOnce('p'+pend.s.id+'|'+Math.round(plan.T),`⏳ ${plan.rot?'rotating to':'queued'} ${name(pend.s)} (${desc(pend.m)}, ${dirTxt[plan.dir]}): fade ${fmt(plan.fadeAt)}→${fmt(plan.T)}, enters at ${plan.entry.why} (${fmt(plan.entry.tAlign)})`);
@@ -447,11 +548,12 @@ function draw(){
 }
 
 function render(){
-  const st=S(),b=cadence(),a=AU[ai],len=cur?(a.duration||cur.dur||0):0,el=cur?a.currentTime:0;
-  $('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':'steps / BPM · manual';
+  const st=S(),b=cadNow(),a=AU[ai],len=cur?(a.duration||cur.dur||0):0,el=cur?a.currentTime:0;
+  $('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':src==='motion'?'steps / min · phone motion':src==='ped'?'steps / min · step counter':'steps / BPM · manual';
   const mc=cur&&match(cur,b);
   $('np').textContent=cur?name(cur):(timer?'Silence':'Press Start');
-  $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range'):'';
+  $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range')
+    +(isPush()?' · push':!cur.yt&&Math.abs(rateCur-1)>0.002?` · playing at ${(rateCur*100).toFixed(1)}%`:'')+(lockMsg?' · '+lockMsg:''):'';
   $('ytbox').style.display=cur&&cur.yt?'block':'none';
   $('fill').style.width=len?Math.min(100,el/len*100)+'%':'0';
   $('mkmin').style.left=len?Math.min(100,(base+st.min)/len*100)+'%':'0';
@@ -472,9 +574,9 @@ async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||
 $('go').onclick=()=>{
   if(timer){clearInterval(timer);timer=null;AU.forEach(a=>a.pause());cur=null;plan=null;disarm();keepAwake(false);$('go').textContent='▶ Start';return render()}
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
-  played=new Map();playSeq=0;cadHist=[];pushSong=null;$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
+  played=new Map();playSeq=0;cadHist=[];pushState=null;songsSincePush=0;outSince=null;$('go').textContent='⏹ Stop';keepAwake(true);log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','bl','stretch','lat','pxf'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 // Cadence (steps/min) straight from the phone's accelerometer: no step counting, no sync lag.
 // Orientation-independent (uses the magnitude of acceleration), then finds the repeat period of the motion by
@@ -553,7 +655,137 @@ class MotionCadence {
     const h = [...this.hist].sort((a, b) => a - b); return h[h.length >> 1];
   }
 }
-if (typeof module !== 'undefined') module.exports = { MotionCadence };
+// Foot landings from the accelerometer: one event per step, with the time the foot hit the ground.
+// Each landing is a sharp jolt in the total acceleration (orientation doesn't matter, so pocket, hand and armband all
+// work). A landing is a local peak of the lightly smoothed jolt that is (1) tall enough relative to your recent
+// steps, (2) far enough after the previous step, and (3) confirmed by ~0.1 s of signal after it.
+// The repeat period from MotionCadence (above) is used as a cross-check: in a pocket the far leg's landing is much
+// weaker, so if only every other step is found, the missing ones are filled in at the midpoint.
+// cadence() is the median of your last few step intervals: it follows a change of pace within 3-4 steps, and only
+// says 0 when steps stop for longer than a slow walking step (not when they just get gentler).
+class StepTracker {
+  constructor(o = {}) {
+    this.minAmp = o.minAmp != null ? o.minAmp : 0.5;   // m/s²: smallest jolt that can count as a step
+    this.rel = 0.3;              // a step must reach this share of your recent typical step
+    this.ac = new MotionCadence({ win: 3000, minStd: 0.25 });
+    this.raw = [];               // [t, |a| - g] for the smoothing window
+    this.sm = [];                // [t, smoothed jolt] for peak confirmation
+    this.base = null;            // slow baseline of |a| (≈ g)
+    this.steps = [];             // [t, virtual?] recent steps
+    this.heights = [];           // heights of recent real steps
+    this.count = 0;              // steps since start
+    this.cand = null;            // [t, h] peak being confirmed
+    this.minSince = Infinity;    // lowest point since the last step (a real landing comes after a dip)
+    this.stride = 0;             // >=3: only every other step is being found (filled in at midpoints)
+    this.lastT = 0; this.lastPeak = null;
+    this.onStep = null;          // callback(t, virtual)
+  }
+  push(t, ax, ay, az) {
+    const m = Math.sqrt(ax * ax + ay * ay + az * az);
+    this.ac.push(t, ax, ay, az);
+    const dt = this.lastT ? Math.min(0.1, Math.max(0.001, (t - this.lastT) / 1000)) : 0.016; this.lastT = t;
+    this.base = this.base == null ? m : this.base + (m - this.base) * (1 - Math.exp(-dt / 0.5));
+    this.raw.push([t, m - this.base]);
+    while (this.raw.length && this.raw[0][0] < t - 200) this.raw.shift();
+    // centred ±35 ms average, evaluated for the newest sample that has 35 ms of signal after it
+    const H = 35;
+    for (let k = this.raw.length - 1; k >= 0; k--) {
+      const tk = this.raw[k][0];
+      if (tk > t - H) continue;
+      if (this.sm.length && tk <= this.sm[this.sm.length - 1][0]) break;
+      let s = 0, n = 0; for (const [ti, v] of this.raw) if (Math.abs(ti - tk) <= H) { s += v; n++; }
+      this._sample(tk, s / n);
+      break;
+    }
+  }
+  expected() {                   // expected time between steps (ms), or null
+    // The repeat period of the whole motion is the steadier guide (a stray swing doesn't move it), so prefer it when
+    // it is clear; your recent step intervals otherwise.
+    const ac = this.ac.cadence(), acI = ac && this.ac.quality >= 0.45 ? 60000 / ac : null;
+    const iv = this._intervals(), md = iv.length >= 3 ? median(iv) : null;
+    if (acI && md && md > 1.7 * acI && md < 2.3 * acI) return acI;   // we're finding every other step: trust the period
+    return acI || md;
+  }
+  _intervals() {                 // the last 6 gaps between steps, leaving out pauses (> 1.8 s)
+    const out = []; for (let i = 1; i < this.steps.length; i++) { const d = this.steps[i][0] - this.steps[i - 1][0]; if (d < 1800) out.push(d); }
+    return out.slice(-6);
+  }
+  _sample(t, v) {
+    this.sm.push([t, v]); while (this.sm.length && this.sm[0][0] < t - 400) this.sm.shift();
+    this.minSince = Math.min(this.minSince, v);
+    const exp = this.expected() || 400;
+    const refr = Math.max(240, 0.62 * exp);
+    const last = this.lastPeak != null ? this.lastPeak : -1e9;
+    const typ = this.heights.length >= 3 ? median(this.heights) : 0;
+    // sensor noise, learned while no steps are happening, so a still phone never counts steps
+    if (t - last > 1500 && this.ac.std != null && this.ac.std < 0.6) this.quiet = (this.quiet || 0) + (v * v - (this.quiet || 0)) * 0.02;
+    else if (t - last <= 1500 && this.quiet) this.quiet *= 0.999;   // moving again: let it fade
+    const th = Math.max(this.minAmp, this.rel * typ, 5 * Math.sqrt(this.quiet || 0));
+    if (this.cand && v > this.cand[1]) this.cand = [t, v];
+    else if (!this.cand && v >= th && t - last >= refr) this.cand = [t, v];
+    if (this.cand && t - this.cand[0] >= 100) {                       // nothing taller for 0.1 s: it was a peak
+      const [pt, ph] = this.cand; this.cand = null;
+      const dipped = this.minSince < ph - 0.5 * th;
+      if (ph >= th && pt - last >= refr && dipped) this._step(this._landing(pt, ph), ph, pt);
+    }
+    // getting gentler (slowing down): when a step is overdue, the typical height halves every ~0.2 s, so softer
+    // steps count again within a fraction of a second instead of the tracker going quiet
+    if (this.heights.length && t - last > 1.3 * exp) {
+      const k = Math.exp(-(t - (this._decT || t)) / 290); this.heights = this.heights.map(h => h * k);
+    }
+    this._decT = t;
+  }
+  // The peak is the body's hardest push, mid-stance. The foot landed earlier, where the jolt was rising through
+  // the middle of its range (from the low point before it up to the peak): that's the time we report.
+  _landing(pt, ph) {
+    const lo = Math.min(this.minSince, 0), level = lo + 0.45 * (ph - lo), sm = this.sm;
+    let i = sm.length - 1; while (i > 0 && sm[i][0] > pt) i--;
+    for (; i > 0 && pt - sm[i][0] < 300; i--) {
+      const [t1, v1] = sm[i - 1], [t2, v2] = sm[i];
+      if (v1 < level && v2 >= level) return t1 + (t2 - t1) * (level - v1) / (v2 - v1 || 1);
+    }
+    return pt - 40;
+  }
+  _step(t, h, peakT) {
+    if (peakT == null) peakT = t;
+    const last = this.steps.length ? this.steps[this.steps.length - 1][0] : null;
+    if (last != null && t - last < 200) return;                     // landing time moved too close to the last step
+    // stride check: are we finding only every other step? (repeat period says steps come twice as often)
+    const ac = this.ac.cadence();
+    if (last != null && ac) {
+      const acI = 60000 / ac, d = t - last, r = d / acI;
+      if (r > 1.7 && r < 2.3 && this.ac.quality > 0.4) this.stride = Math.min(6, this.stride + 1);
+      else if (r > 0.75 && r < 1.3) this.stride = Math.max(0, this.stride - 1);
+      if (this.stride >= 2 && r > 1.7 && r < 2.3) this._emit((last + t) / 2, true);
+    }
+    this._emit(t, false);
+    this.heights.push(h); if (this.heights.length > 8) this.heights.shift();
+    this.minSince = Infinity; this.lastPeak = peakT;
+  }
+  _emit(t, virt) {
+    this.steps.push([t, virt]); if (this.steps.length > 40) this.steps.shift();
+    this.count++;
+    if (this.onStep) this.onStep(t, virt);
+  }
+  // steps/min from your last few steps. 0 = stopped, null = not enough steps yet.
+  // "Stopped" needs both: no steps for a while AND the phone has gone quiet. While you're still moving (slowing down,
+  // a few missed steps) it keeps the last pace instead of dropping to 0.
+  cadence(now) {
+    if (now == null) now = this.lastT;
+    if (!this.steps.length) return this._last0 ? 0 : null;
+    const iv = this._intervals(), med = iv.length ? median(iv) : 600, gap = now - this.steps[this.steps.length - 1][0];
+    const moving = (this.ac.std || 0) >= 1.0;
+    if ((gap > Math.max(2000, 3 * med) && !moving) || gap > 5000) {
+      this.steps = []; this.heights = []; this.stride = 0; this.lastPeak = null; this._last0 = true; this._held = null; return 0;
+    }
+    this._last0 = false;
+    if (iv.length < 3) return this._held || null;
+    return (this._held = 60000 / med);
+  }
+  lastStep() { return this.steps.length ? this.steps[this.steps.length - 1][0] : null; }
+}
+function median(a) { const s = [...a].sort((x, y) => x - y), n = s.length; return n ? (n % 2 ? s[n >> 1] : (s[n / 2 - 1] + s[n / 2]) / 2) : null; }
+if (typeof module !== 'undefined') module.exports = { MotionCadence, StepTracker, median };
 // ======================= phone-only additions =======================
 const native=window.RunDJNative&&window.RunDJNative.isNative?window.RunDJNative:null;
 const keepAwake=on=>{try{if(native)on?native.KeepAwake.keepAwake():native.KeepAwake.allowSleep()}catch(e){}};
@@ -746,30 +978,77 @@ function setSrc(v){
   render();
 }
 
-// ---- live source 1: phone motion (accelerometer), instant. See motion.js.
-let mDet=null,mTimer=null,mWall=0;
+// ---- live source 1: phone motion (accelerometer), instant. Each foot landing is a step (StepTracker in motion.js):
+// it feeds the cadence, flashes the dot, and lets beat lock pull the song's beats onto your footfalls.
+let mDet=null,mTimer=null,mWall=0,dotT=null;
 function onMotion(e){
   const a=e.accelerationIncludingGravity;if(!a||a.x==null||!mDet)return;
-  mWall=performance.now();mDet.push(e.timeStamp||mWall,a.x,a.y,a.z);
+  const now=performance.now();mWall=now;
+  let t=e.timeStamp;if(!(t>0)||Math.abs(t-now)>5000)t=now;   // some WebViews stamp events with wall-clock time
+  mDet.push(t,a.x,a.y,a.z);
+  if(rec)recSample(t,a);
+}
+function onStep(t,virtual){
+  if(!virtual&&typeof stepAt==='function')stepAt(t);
+  if(rec)rec.steps.push([Math.round(t-rec.t0),virtual?1:0]);
+  const d=$('stepdot');if(d){d.style.background=virtual?'var(--q)':'var(--acc)';clearTimeout(dotT);dotT=setTimeout(()=>{d.style.background='var(--bd)'},120)}
 }
 async function motionStart(){
-  mDet=new MotionCadence({minStd:+$('mmin').value||0.5});mWall=0;
+  mDet=new StepTracker({minAmp:+$('mmin').value||0.5});mDet.onStep=onStep;mWall=0;
   try{if(typeof DeviceMotionEvent!=='undefined'&&typeof DeviceMotionEvent.requestPermission==='function'){
     if(await DeviceMotionEvent.requestPermission()!=='granted'){say('livestatus','Motion permission denied.');return}}}catch(e){}
   window.addEventListener('devicemotion',onMotion);say('livestatus','Waiting for motion data…');
   mTimer=setInterval(motionTick,500);
 }
-function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null}
+function motionStop(){window.removeEventListener('devicemotion',onMotion);clearInterval(mTimer);mTimer=null;mDet=null;if(rec)recStop()}
 function motionTick(){
   if(!mDet)return;
-  mDet.minStd=+$('mmin').value||0.5;
+  mDet.minAmp=+$('mmin').value||0.5;
   if(!mWall||performance.now()-mWall>2500){motionCad=null;
     say('livestatus',mWall?'The motion sensor stopped sending data.':'No motion data yet. This phone or WebView may not expose the accelerometer.');render();return}
-  const c=mDet.cadence();motionCad=c;
-  say('livestatus',c==null?'Collecting a few seconds of motion…':c===0?'Not moving with steps (cadence 0)':
-    `${Math.round(c)} steps/min · live from phone motion · signal ${(mDet.quality||0).toFixed(2)}`);
+  const c=mDet.cadence(performance.now());motionCad=c;
+  say('livestatus',c==null?(mDet.count?`${mDet.count} steps · finding your rhythm…`:'Waiting for your first steps…'):c===0?'Stopped (cadence 0)':
+    `${Math.round(c)} steps/min · ${mDet.count} steps`+(typeof lockMsg!=='undefined'&&lockMsg?' · '+lockMsg:''));
+  if(rec){rec.cad.push([Math.round(performance.now()-rec.t0),c==null?null:Math.round(c*10)/10,cur?cur.title:null,Math.round((AU[ai].playbackRate||1)*1000)/1000]);recTick()}
   render();
 }
+
+// ---- run recorder: raw motion + the steps and cadence the app found, saved as a JSON file to share.
+// Replaying these (tools/replay_run.mjs) is how the step detector gets tuned to real phones and real running.
+let rec=null;
+const REC_MAX=20*60*1000;                                       // stops by itself after 20 minutes
+function recSample(t,a){rec.m.push([Math.round(t-rec.t0),Math.round(a.x*1000)/1000,Math.round(a.y*1000)/1000,Math.round(a.z*1000)/1000])}
+function recStart(){
+  if(src!=='motion'){say('recstatus','Switch the cadence source to Phone motion first.');return}
+  rec={v:1,app:'Run DJ',kind:'motion-recording',started:new Date().toISOString(),carry:$('carry').value,ua:navigator.userAgent,
+    settings:{mmin:+$('mmin').value,bl:$('bl').checked,lat:+$('lat').value},t0:performance.now(),m:[],steps:[],cad:[],marks:[]};
+  $('recbtn').textContent='■ Stop & save';$('recmark').style.display='';$('carry').disabled=true;
+  say('recstatus','Recording. Run normally: include a speed-up, a slow-down and a short stop. Tap Mark at any change.');
+}
+function recTick(){
+  const s=(performance.now()-rec.t0)/1000;
+  say('recstatus',`Recording ${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')} · ${rec.steps.length} steps · ${rec.marks.length} marks`);
+  if(performance.now()-rec.t0>REC_MAX)recStop();
+}
+async function recStop(){
+  if(!rec)return;const r=rec;rec=null;
+  $('recbtn').textContent='● Record run';$('recmark').style.display='none';$('carry').disabled=false;
+  r.ended=new Date().toISOString();
+  const name=`rundj_run_${r.carry}_${r.started.slice(0,16).replace(/[-:T]/g,'')}.json`,data=JSON.stringify(r);
+  const FS=native&&native.Filesystem,SH=native&&native.Share;
+  try{
+    if(FS&&SH){
+      await FS.writeFile({path:name,data,directory:native.Directory.Cache,encoding:native.Encoding.UTF8});
+      const {uri}=await FS.getUri({path:name,directory:native.Directory.Cache});
+      await SH.share({title:'Run DJ recording',text:`Run DJ motion recording (${r.carry})`,files:[uri],dialogTitle:'Send the recording'});
+    }else{
+      const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type:'application/json'}));a.download=name;document.body.appendChild(a);a.click();a.remove();
+    }
+    say('recstatus',`Saved ${name} (${Math.round(data.length/1024)} KB, ${r.steps.length} steps).`);
+  }catch(e){say('recstatus','Could not save the recording: '+(e.message||e))}
+}
+$('recbtn').onclick=()=>rec?recStop():recStart();
+$('recmark').onclick=()=>{if(rec){rec.marks.push(Math.round(performance.now()-rec.t0));recTick()}};
 
 // ---- live source 2: the phone's hardware step counter (Android TYPE_STEP_COUNTER)
 const PED=native&&native.Pedometer;let pedOn=false,pedSamples=[],pedHandle=null,pedTimer=null;
@@ -861,7 +1140,7 @@ const votesLine=t=>{                   // under the title of a "check" song: wha
   const A=window.RunDJAnalyzer;if(!A||t.src!=='check'||!t.votes||!t.votes.length)return '';
   return `<br><span class="small">${esc(A.votesText(t.votes,{bpm:t.bpm,bpmFeel:t.bpmFeel||'normal',flag:'check'}))}${t.bpmWhy?' — '+esc(t.bpmWhy):''}</span>`};
 // ---- remember settings between launches
-const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','push','pushmax','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
+const SAVED=['country','spid','spsec','autostart','bpm','tol','min','mar','spread','xf','ew','htpen','conf','wait','swap','hcwin','hcstale','hcpoll','mmin','pedwin','rotate','hold','bl','stretch','lat','pxf','half','alt','eHi','bLow','eLo','bHigh','gsbkey'];
 function saveSettings(){try{const o={};SAVED.forEach(id=>{const e=$(id);o[id]=e.type==='checkbox'?e.checked:e.value});localStorage.setItem('rundj_settings',JSON.stringify(o))}catch(e){}}
 function loadSettings(){try{const o=JSON.parse(localStorage.getItem('rundj_settings')||'{}');SAVED.forEach(id=>{if(id in o){const e=$(id);e.type==='checkbox'?e.checked=o[id]:e.value=o[id]}})}catch(e){}}
 

@@ -103,9 +103,13 @@ def structure(y, sr, hop, beat_frames):
     lvl = np.clip(0.6 * loud / p95(loud) + 0.4 * ons / p95(ons), 0, None)
     lvl = np.convolve(np.pad(lvl, 1, mode="edge"), [0.25, 0.5, 0.25], mode="valid")
     lvl = np.clip(lvl / p95(lvl), 0, 1)
+    # Per-bar drive 0..1: how much rhythm section is playing (kick/bass onsets, plus all onsets). A vocals-only or
+    # stripped-down stretch scores low even when it is loud; a build where drums and instruments come in scores high.
+    kick = np.array([low[a:max(b, a + 1)].mean() for a, b in zip(bf, ends)])
+    drv = np.clip(0.6 * kick / p95(kick) + 0.4 * ons / p95(ons), 0, 1)
     times = librosa.frames_to_time(bf, sr=sr, hop_length=hop)
-    bars = [[round(float(t), 2), round(float(s), 2), int(p), round(float(l), 2)]
-            for t, s, p, l in zip(times, score, ph, lvl)]
+    bars = [[round(float(t), 2), round(float(s), 2), int(p), round(float(l), 2), round(float(d), 2)]
+            for t, s, p, l, d in zip(times, score, ph, lvl, drv)]
     idx = np.linspace(0, len(rms), 241).astype(int)
     wave = np.array([rms[a:max(b, a + 1)].mean() for a, b in zip(idx[:-1], idx[1:])])
     wave = np.clip(wave / (np.percentile(wave, 98) + 1e-9), 0, 1)
@@ -201,7 +205,7 @@ def scan(folder, rescan=False):
     for i, p in enumerate(files, 1):
         mtime, key = p.stat().st_mtime, str(p)
         e = cache.get(key)
-        if not e or e.get("mtime") != mtime or e.get("v") != 4 or (HAVE_ESSENTIA and "tempo_src" not in e):
+        if not e or e.get("mtime") != mtime or e.get("v") != 5 or (HAVE_ESSENTIA and "tempo_src" not in e):
             old = e if e and e.get("mtime") == mtime else {}
             title, artist, dur, tagbpm = read_tags(p)
             print(f"  [{i}/{len(files)}] analysing {p.name} ...")
@@ -213,7 +217,7 @@ def scan(folder, rescan=False):
                 bpm = tagbpm                              # tags are trusted: no alt tempos
             elif a:
                 bpm, src, alts = a["bpm"], "detected", a["alts"]
-            e = dict(v=4, mtime=mtime, title=title, artist=artist, dur=dur, bpm=bpm, src=src,
+            e = dict(v=5, mtime=mtime, title=title, artist=artist, dur=dur, bpm=bpm, src=src,
                      alts=alts, feats=a["feats"] if a else None,
                      bars=(a or {}).get("bars"), wave=(a or {}).get("wave"),
                      tempo_src=(a or {}).get("tempo_src"), tempo_conf=(a or {}).get("tempo_conf"),
@@ -382,8 +386,10 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
   <label>Half-time penalty<input type="number" id="htpen" value="4"></label>
   <label>Alt-tempo min conf<input type="number" id="conf" value="0.5" step="0.1"></label>
   <label class="ck"><input type="checkbox" id="hold" checked> Hold a song while it still fits</label>
-  <label class="ck"><input type="checkbox" id="push" checked> When every song at your pace has played, nudge the tempo up</label>
-  <label>Nudge up by at most (BPM)<input type="number" id="pushmax" value="8"></label>
+  <label class="ck"><input type="checkbox" id="bl" checked> Beat lock: the song follows your steps (own songs)</label>
+  <label>Follow your pace by up to (%)<input type="number" id="stretch" value="6" min="0" max="10"></label>
+  <label>Beat offset (ms)<input type="number" id="lat" value="80" step="10"></label>
+  <label>Pace-change fade (s)<input type="number" id="pxf" value="3" step="0.5" min="1" max="4"></label>
   <label class="ck"><input type="checkbox" id="rotate" checked> Rotate songs at steady tempo</label>
   <label class="ck"><input type="checkbox" id="half" checked> Half-time matching</label>
   <label class="ck"><input type="checkbox" id="alt" checked> Use alt tempos</label></div></section>
@@ -394,9 +400,11 @@ li.in{opacity:1}li.cur{background:var(--track);font-weight:600}
 const $=id=>document.getElementById(id);
 const SILENT='data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const AU=[new Audio(),new Audio()];
+let stepT=[],pc=0,lockErr=[],outSince=null,curMult=1,rateCur=1,songsSincePush=0,pushState=null,lockMsg='';
 let ai=0,songs=[],cur=null,pend=null,boundary=null,lastEl=0,timer=null,fadeT=null,lastKey='',listKey='',ver=0,base=0,plan=null,armT=null,fading=false,fadeStart=0,fadeLen=0,fadeNew=null,fadeOld=null,prepId=null,prepSp=0,curEff=0,keep=null,rng=Math.random,played=new Map(),playSeq=0,cadHist=[],pushSong=null,pushBase=0,nudgeLog=null;
-const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:$('push').checked,pushMax:+$('pushmax').value,xf:+$('xf').value,
+const S=()=>({tol:+$('tol').value,min:+$('min').value,mar:+$('mar').value,spread:+$('spread').value,rotate:$('rotate').checked,hold:$('hold').checked,push:true,pushMax:5,bl:$('bl').checked,stretch:+$('stretch').value,lat:+$('lat').value,pxf:+$('pxf').value,xf:+$('xf').value,
   ew:+$('ew').value,swap:$('swap').value,wait:+$('wait').value,htpen:+$('htpen').value,conf:+$('conf').value,half:$('half').checked,alt:$('alt').checked});
+const cadNow=()=>+$('bpm').value;
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 const log=m=>{const d=document.createElement('div');d.textContent=m;$('log').prepend(d)};
 const logOnce=(k,m)=>{if(k!==lastKey){lastKey=k;log(m)}};
@@ -404,34 +412,32 @@ const name=s=>s.artist?`${s.title} — ${s.artist}`:s.title;
 
 // How can this song fit cadence c? Tries 1:1 first; half-time (runner takes 2 steps per beat) costs a penalty.
 // cost = distance + penalties - energy bonus. null if nothing is within tolerance.
-function match(s,c){
-  const st=S();let r=null;
+function match(s,c,tolO){
+  const st=S(),tol=tolO==null?st.tol:tolO;let r=null;
   const cands=[{b:s.bpm,pen:0,alt:false}];
   if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)cands.push({b:a.bpm,pen:1,alt:true});
   const modes=[[1,0,'1:1']];if(st.half)modes.push([2,st.htpen,'half-time']);
   for(const k of cands)for(const [mult,pen,mode] of modes){
     const diff=Math.abs(k.b*mult-c);
-    if(diff<=st.tol){const cost=diff+k.pen+pen-st.ew*s.energy;
+    if(diff<=tol){const cost=diff+k.pen+pen-st.ew*s.energy;
       if(!r||cost<r.cost)r={cost,diff,tempo:k.b,mode:mode+(k.alt?', alt tempo':'')}}
   }
   return r;
 }
-// Nudge: songs NOT yet played that are a little faster than your pace (just above the tolerance, up to +pushMax).
-function nudgeCandidates(c,excl){
+// Push: a song 3-5 BPM faster than your pace (any not played recently), offered every third song when you're steady
+function pushCandidates(c,excl){
   const st=S(),out=[];
   for(const s of songs){
-    if(s===excl||s.bad||lastPlayed(s)>=0)continue;
+    if(s===excl||s.bad)continue;
     const ks=[{b:s.bpm,pen:0}];if(st.alt)for(const a of s.alts||[])if(a.conf>=st.conf)ks.push({b:a.bpm,pen:1});
     let best=null;
     for(const k of ks)for(const [mult,pen,mode] of (st.half?[[1,0,'1:1'],[2,st.htpen,'half-time']]:[[1,0,'1:1']])){
-      const e=k.b*mult,up=e-c;
-      if(up>st.tol&&up<=st.tol+st.pushMax){const m={cost:up+k.pen+pen-st.ew*s.energy,diff:up,tempo:k.b,mode:mode+', tempo nudge',push:true};if(!best||m.cost<best.cost)best=m}
+      const up=k.b*mult-c;
+      if(up>=3&&up<=5.5){const m={cost:Math.abs(up-4)+k.pen+pen-st.ew*s.energy,diff:up,tempo:k.b,mode:mode+', push',push:true};if(!best||m.cost<best.cost)best=m}
     }
     if(best)out.push({s,m:best});
   }
-  if(!out.length)return null;
-  const lo=Math.min(...out.map(x=>x.m.diff)),near=out.filter(x=>x.m.diff<=lo+1.5);   // the smallest step up
-  return near.reduce((a,b)=>b.m.cost<a.m.cost?b:a);
+  return out;
 }
 // Your pace over the last minute: steady (range within 5) and not drifting down
 function paceTrend(){
@@ -455,6 +461,59 @@ function highRuns(s){   // stretches of ≥3 bars with energy ≥0.75: the choru
   return s._hr=runs.filter(r=>r[1]-r[0]>=3).map(r=>({start:s.bars[r[0]][0],end:s.bars[r[1]][0]}));
 }
 const dirOf=x=>{const r=eff(x.m)/curEff;return r>1.03?'up':r<.97?'down':'same'};
+const drv=b=>b[4]==null?lv(b):b[4];                            // bar[4]: how much drums/instruments are playing
+
+// ---- beat lock. The song's tempo follows your cadence (within ±stretch %), and each step nudges it so the next
+// beat lands on your next footfall. Own songs only (YouTube's player can't change speed smoothly) and only when the
+// song has beat data. Not during a push: that song is meant to be faster than you.
+const lockable=s=>!!(s&&!s.yt&&s.bars&&s.bars.length>4);
+const isPush=()=>!!(pushState&&cur===pushState.s);
+function targetRate(x,c){                                       // playback speed that puts this song at cadence c
+  const st=S();if(!st.bl||!x||x.s.yt||x.m.push||!c)return 1;
+  const r=c/eff(x.m),lim=st.stretch/100;return Math.min(1+lim,Math.max(1-lim,r));
+}
+function applyRate(){
+  const a=AU[ai];if(!cur||cur.yt||fading){return}
+  const st=S(),c=cadNow(),base=isPush()?1:targetRate({s:cur,m:{tempo:curEff/curMult,mode:curMult===2?'half-time':'1:1'}},c);
+  const lim=st.stretch/100+0.04,r=Math.min(1+lim,Math.max(1-lim,base*(isPush()||!st.bl?1:1+pc)));
+  if(Math.abs(r-(a.playbackRate||1))>0.0015){a.playbackRate=r}
+  rateCur=a.playbackRate||1;
+}
+// how far (in steps, -0.5..0.5) song position p is from the nearest step-beat; + = the music is ahead of your foot
+function phaseErr(s,p){
+  const B=s.bars;if(!B||B.length<2)return null;
+  const lens=[];for(let i=1;i<B.length;i++)lens.push(B[i][0]-B[i-1][0]);lens.sort((x,y)=>x-y);
+  const bar=lens[lens.length>>1],ta=240/bar,n=Math.max(1,Math.round(curEff/ta));   // steps per beat (2 = half-time, double-time)
+  let i=0;while(i<B.length-1&&B[i+1][0]<=p)i++;
+  const t0=B[i][0],L=i<B.length-1?B[i+1][0]-t0:bar,u=(p-t0)/(L/(4*n));
+  return u-Math.round(u);
+}
+// called by the phone each time a foot lands (t = performance.now() of the landing)
+function stepAt(t){
+  stepT.push(t);if(stepT.length>16)stepT.shift();
+  const st=S();if(!st.bl||!cur||fading||isPush()||!lockable(cur))return;
+  const a=AU[ai];if(a.paused)return;
+  const r=a.playbackRate||1,p=a.currentTime-((performance.now()-t)/1000+st.lat/1000)*r;   // what you heard as the foot landed
+  const e=phaseErr(cur,p);if(e==null)return;
+  lockErr.push(e);if(lockErr.length>8)lockErr.shift();
+  pc=Math.max(-0.04,Math.min(0.04,0.8*pc-0.12*e));             // music ahead -> slow down a touch, behind -> speed up
+  applyRate();
+  const ms=Math.round(lockErr.reduce((x,y)=>x+Math.abs(y),0)/lockErr.length*60000/cadNow());
+  lockMsg=lockErr.length>=4?`beat lock ±${ms} ms`:'';
+}
+// Entry for speeding up: a phrase start where the drums and instruments are coming in, not a stripped-down
+// (e.g. vocals-only) stretch. Earliest one nearly as good as the best, so we don't skip half the song for it.
+function buildEntry(s){
+  const B=s.bars,lim=.7*(s.dur||1e9),val=x=>0.5*lv(x)+0.5*drv(x),avg=a=>a.reduce((p,x)=>p+val(x),0)/a.length,c=[];
+  for(let i=0;i<B.length;i++){
+    const b=B[i];if(b[2]!==1||b[0]>lim)continue;
+    const nx=B.slice(i,i+4),pv=B.slice(Math.max(0,i-4),i);if(nx.length<2)continue;
+    const after=avg(nx),before=pv.length?avg(pv):after*0.6,thin=Math.min(drv(nx[0]),drv(nx[1]))<0.35;
+    c.push({t:b[0],sc:after+0.5*Math.max(0,after-before)-(thin?0.5:0)});
+  }
+  if(!c.length)return null;
+  const best=Math.max(...c.map(x=>x.sc));return c.find(x=>x.sc>=best-0.1*Math.abs(best)).t;
+}
 
 // ---- choosing the next song: every song that fits your pace is a candidate. Songs not yet played this run come first,
 // then the one played longest ago, so you hear every fitting song before any repeats. Among equals: the near-best match.
@@ -478,7 +537,8 @@ function pickEntry(s,Lo,dir,xf){
     if(dir==='down'){
       const tg=Math.max(.2,Lo-.25),c=s.bars.filter(b=>b[2]===1&&b[0]<=.7*(s.dur||1e9));
       if(c.length){t=c.reduce((a,b)=>Math.abs(lv(b)-tg)<Math.abs(lv(a)-tg)-1e-9?b:a)[0];why='a calmer section'}
-    }else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
+    }else if(dir==='up'){const e=buildEntry(s);if(e!=null){t=e;why='where the drums and instruments come in'}}
+    else{const h=highRuns(s)[0];if(h){t=h.start;why='its first chorus'}}
   }else if(dir!=='down'&&(s.dur||0)>90){   // no section data: skip the intro and first verse instead of starting cold
     const bar=240/(s.bpm||120);t=Math.round(Math.min(45,.25*s.dur)/bar)*bar;why='about a quarter in (no section data)'}
   const sp=t-xf;return {tAlign:t,startPos:Math.max(0,sp),delay:Math.max(0,-sp),why};
@@ -506,11 +566,27 @@ function pickExit(s,el,st,dir,rot){
 }
 // songs with no beat/section data: leave at the earliest allowed moment (rotation: about 3/4 through)
 const plainExit=(el,st,rot)=>{const tmin=Math.max(base+st.min,el+st.xf+0.3);return rot?Math.max(tmin,.75*(AU[ai].duration||cur.dur||0)):tmin};
-function makePlan(x,el,st){
-  const dir=dirOf(x),hasBars=cur.bars&&cur.bars.length;
-  const T=hasBars?pickExit(cur,el,st,dir,x.rot):plainExit(el,st,x.rot);
-  if(T==null||T>=(AU[ai].duration||cur.dur||1e9)-st.xf-1)return null;
-  return {T,fadeAt:T-st.xf,x,dir,rot:!!x.rot,entry:pickEntry(x.s,hasBars?lv(barAt(cur,T)):.5,dir,st.xf)};
+// next beat of the current song at or after media time t (the bar grid split in 4), or t itself without beat data
+function nextBeat(s,t){
+  const B=s.bars;if(!B||B.length<2)return t;
+  for(let i=0;i<B.length;i++){const L=(i<B.length-1?B[i+1][0]:B[i][0]+(B[i][0]-B[i-1][0]))-B[i][0];
+    for(let k=0;k<4;k++){const bt=B[i][0]+k*L/4;if(bt>=t)return bt}}
+  return t;
+}
+// fast: your pace changed, so the fade starts on the next beat and lasts pxf seconds (done well inside 5 s).
+// Tforce: leave at this point (the end of a pushed song's chorus).
+function makePlan(x,el,st,fast,Tforce){
+  const dir=dirOf(x),hasBars=cur.bars&&cur.bars.length,r=rateCur||1;
+  const fx=fast?Math.min(st.pxf,st.xf)||3:st.xf;
+  let T,fadeAt;
+  if(fast){fadeAt=hasBars?nextBeat(cur,el+0.05):el+0.05;T=fadeAt+fx*r}
+  else{
+    T=Tforce!=null?Math.max(Tforce,el+fx*r+0.3):(hasBars?pickExit(cur,el,st,dir,x.rot):plainExit(el,st,x.rot));
+    if(T==null||T>=(AU[ai].duration||cur.dur||1e9)-fx-1)return null;
+    fadeAt=T-fx*r;
+  }
+  const rn=targetRate(x,cadNow());
+  return {T,fadeAt,fx,fast:!!fast,forced:Tforce!=null,x,dir,rot:!!x.rot,entry:pickEntry(x.s,hasBars?lv(barAt(cur,T)):.5,dir,fx*rn)};
 }
 
 // Pre-load the next song on the idle player so the fade doesn't wait on the network/decoder
@@ -523,31 +599,36 @@ function fadeStep(){   // time-based, so the fade ends exactly xf seconds after 
   fadeNew.volume=gi;fadeOld.volume=go;
   if(f>=1){clearInterval(fadeT);fading=false;fadeOld.pause()}
 }
-function crossfade(x,entry){
-  const xf=cur?S().xf:0,old=AU[ai];ai=1-ai;const n=AU[ai],e=entry||{startPos:0,delay:0};   // first song starts at full volume
+function crossfade(x,entry,fx){
+  const xf=cur?(fx!=null?fx:S().xf):0,old=AU[ai];ai=1-ai;const n=AU[ai],e=entry||{startPos:0,delay:0};   // first song starts at full volume
   if(!(prepId===x.s.id&&prepSp===e.startPos)){
     n.src='/song/'+x.s.id;
     if(e.startPos>0.05)n.addEventListener('loadedmetadata',()=>{n.currentTime=e.startPos},{once:true});
   }
   prepId=null;n.volume=xf>0?0:1;
+  const rn=targetRate(x,cadNow());if(!x.s.yt){n.defaultPlaybackRate=rn;n.playbackRate=rn}
   const go=()=>n.play().catch(err=>log('⚠ playback blocked: '+err.message));
   e.delay>0?setTimeout(go,e.delay*1000):go();
   clearInterval(fadeT);fading=false;
   if(xf>0){fadeNew=n;fadeOld=old;fadeLen=xf;fadeStart=performance.now();fading=true;fadeT=setInterval(fadeStep,40)}else old.pause();
-  cur=x.s;played.set(songKey(x.s),++playSeq);curEff=eff(x.m);if(x.m.push){pushSong=x.s;pushBase=+$('bpm').value}else pushSong=null;
+  cur=x.s;played.set(songKey(x.s),++playSeq);curEff=eff(x.m);curMult=x.m.mode.startsWith('half')?2:1;rateCur=x.s.yt?1:(n.playbackRate||1);pc=0;lockErr=[];lockMsg='';outSince=null;
+  if(x.m.push){                                                 // the push: remember your pace, and where its chorus ends
+    const sp=e.startPos||0,hr=x.s.bars&&x.s.bars.length?highRuns(x.s):[],ch=hr.find(h=>h.end>sp+8);
+    pushState={s:x.s,base:cadNow(),target:eff(x.m),chorusEnd:ch?ch.end:sp+60};songsSincePush=0;
+  }else{pushState=null;songsSincePush++}
   pend=null;keep=null;boundary=null;plan=null;disarm();base=e.startPos;lastEl=e.startPos;lastKey='';
 }
 function disarm(){clearInterval(armT);armT=null}
 function armCheck(){   // 25 ms poll while a swap is planned, so the fade starts on time
   if(!plan||!cur){disarm();return}
   if(fading)return;
-  if(AU[ai].currentTime>=plan.fadeAt){const p=plan;log(`🔀 fading to ${name(p.x.s)} (${desc(p.x.m)}), fade ends at ${fmt(p.T)}; it enters at ${p.entry.why}`);crossfade(p.x,p.entry);render()}
+  if(AU[ai].currentTime>=plan.fadeAt){const p=plan;log(`🔀 fading to ${name(p.x.s)} (${desc(p.x.m)}) over ${p.fx}s; it enters at ${p.entry.why}`);crossfade(p.x,p.entry,p.fx);render()}
 }
 function arm(){if(!armT)armT=setInterval(armCheck,25)}
 const dirTxt={same:'same tempo',up:'tempo up',down:'tempo down'};
 
 function loop(){
-  const b=+$('bpm').value,st=S();
+  const b=cadNow(),st=S();
   cadHist.push([performance.now(),b]);while(cadHist.length&&performance.now()-cadHist[0][0]>90000)cadHist.shift();
   if(!cur){
     const cs=candidates(b,null),bc=bestOf(cs);
@@ -557,25 +638,36 @@ function loop(){
   }
   const a=AU[ai],el=a.currentTime,len=a.duration||cur.dur||1e9;
   if(fading){lastEl=el;return render()}   // never start a second fade on top of a running one
-  const tr=paceTrend();
-  let mc=match(cur,b);
-  // a nudged (faster) song stays "fitting" while you adapt to it, unless you slow down
-  if(!mc&&cur===pushSong&&!tr.slowing&&b>=pushBase-2){const e=pushSong.bpm;mc={cost:Math.abs(e-b),diff:Math.abs(e-b),tempo:e,mode:'tempo nudge'}}
+  const tr=paceTrend(),now=performance.now();
+  // The playing song stays while your pace is within what it can follow (beat lock stretches it by up to ±stretch %).
+  // A pushed song stays while you keep at least the pace you had when it started.
+  let mc=match(cur,b,Math.max(st.tol,st.bl&&!cur.yt?st.stretch/100*b:0)),forceT=null;
+  if(isPush()){
+    if(b>=pushState.target-2||b>=pushState.base+2.5){log(`💪 you sped up to ${Math.round(b)}: staying with ${cur.title}`);pushState=null}
+    else if(b<pushState.base-4){log(`↘ you slowed down: back to matching your pace`);pushState=null;mc=null}
+    else{mc=mc||{cost:0,diff:Math.abs(pushState.target-b),tempo:curEff/curMult,mode:'push'};forceT=pushState.chorusEnd}
+  }
   const ok=!!mc,cs=candidates(b,cur),bc=bestOf(cs);
-  // hold: while the playing song still fits your cadence, don't jump to a 'slightly better' one; it plays to its last chorus
-  const needSwap=bc&&(!ok||(!st.hold&&bc.m.cost+st.mar<=mc.cost));
-  let pool=null,rot=false;
-  if(needSwap)pool=cs;                                  // current no longer fits (or, with Hold off, another fits clearly better)
-  else if(st.rotate&&ok&&bc){pool=cs;rot=true}          // steady tempo: after the last chorus, on to another fitting song
-  // every song at this pace has played and you're running steadily: the next one is a little faster instead of a repeat
-  if(!needSwap&&st.rotate&&ok&&st.push&&tr.steady&&cs.every(x=>lastPlayed(x.s)>=0)){
-    const nu=nudgeCandidates(b,cur);
-    if(nu){pool=[nu];rot=true;if(nudgeLog!==songKey(nu.s)){nudgeLog=songKey(nu.s);log(`⏫ every song at ${Math.round(b)} has played: next is a little faster, ${name(nu.s)} (${Math.round(nu.m.tempo*(nu.m.mode.startsWith('half')?2:1))})`)}}
+  // a change of pace counts once the song has been out of range for 1 s; then the switch happens right away
+  if(ok)outSince=null;else if(outSince==null)outSince=now;
+  const changed=!ok&&now-outSince>=1000;
+  let pool=null,rot=false,fast=false;
+  if(changed&&bc){pool=cs;fast=true}                         // your pace changed: switch now (within ~4 s)
+  else if(!ok&&bc&&!st.hold)pool=cs;
+  else if(forceT!=null){pool=cs.length?cs:null;rot=true}    // you held your pace through a push: back to matching after its chorus
+  else if(ok&&bc&&!st.hold&&bc.m.cost+st.mar<=mc.cost)pool=cs;
+  else if(st.rotate&&ok&&bc){                                 // steady: after the last chorus, on to another fitting song
+    const close=cs.filter(x=>x.m.diff<3);pool=close.length?close:cs;rot=true}   // (a faster song is kept for the push turns)
+  // every third song at a steady pace: one that's 3-5 BPM faster, to push you on
+  if(rot&&forceT==null&&!isPush()&&songsSincePush>=2&&tr.steady){
+    const pc2=pushCandidates(b,cur);
+    if(pc2.length){pool=pc2;if(nudgeLog!==Math.round(b)){nudgeLog=Math.round(b);log(`⏫ steady at ${Math.round(b)}: next song is a little faster to push you on`)}}
   }
   if(pool&&pool.length){
-    if(!(keep&&keep.cur===cur&&keep.rot===rot&&pool.some(x=>x.s===keep.s)))keep={cur,rot,s:choose(pool).s};   // pick once, stay stable
-    pend=pool.find(x=>x.s===keep.s);pend.rot=rot;
+    if(!(keep&&keep.cur===cur&&keep.rot===rot&&keep.fast===fast&&pool.some(x=>x.s===keep.s)))keep={cur,rot,fast,s:choose(pool).s};   // pick once, stay stable
+    pend=pool.find(x=>x.s===keep.s);pend.rot=rot;pend.fast=fast;
   }else{pend=null;keep=null}
+  applyRate();
   if(a.ended||el>=len-st.xf-0.5){   // song is about to end anyway: fade so it finishes with the file
     let nx=pend;plan=null;disarm();
     if(!nx)nx=choose(cs)||(ok?{s:cur,m:mc}:null);         // repeat the same song only if nothing else fits
@@ -585,7 +677,10 @@ function loop(){
     return render();
   }
   if(!pend){plan=null;disarm();boundary=null;if(!ok)logOnce('out',`⚠ nothing fits ${b} BPM, playing out ${cur.title}`);lastEl=el;return render()}
-  if(!plan||plan.x.s!==pend.s||plan.rot!==!!pend.rot){plan=makePlan(pend,el,st);if(plan)prep(plan.x,plan.entry)}else plan.x=pend;
+  if(!plan||plan.x.s!==pend.s||plan.rot!==!!pend.rot||plan.fast!==!!pend.fast||plan.forced!==(forceT!=null)){
+    plan=makePlan(pend,el,st,fast,forceT);if(plan)prep(plan.x,plan.entry);
+    if(plan&&fast)log(`⚡ pace changed to ${Math.round(b)}: switching to ${name(pend.s)} now (${plan.fx}s fade)`);
+  }else plan.x=pend;
   if(plan){
     boundary=plan.T;arm();
     logOnce('p'+pend.s.id+'|'+Math.round(plan.T),`⏳ ${plan.rot?'rotating to':'queued'} ${name(pend.s)} (${desc(pend.m)}, ${dirTxt[plan.dir]}): fade ${fmt(plan.fadeAt)}→${fmt(plan.T)}, enters at ${plan.entry.why} (${fmt(plan.entry.tAlign)})`);
@@ -607,11 +702,12 @@ function draw(){
 }
 
 function render(){
-  const st=S(),b=+$('bpm').value,a=AU[ai],len=cur?(a.duration||cur.dur||0):0,el=cur?a.currentTime:0;
+  const st=S(),b=cadNow(),a=AU[ai],len=cur?(a.duration||cur.dur||0):0,el=cur?a.currentTime:0;
   $('bpmv').textContent=b;
   const mc=cur&&match(cur,b);
   $('np').textContent=cur?name(cur):(timer?'Silence':'Press Start');
-  $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range'):'';
+  $('sub').textContent=cur?`${cur.bpm} BPM (${cur.src}) · ⚡${cur.energy.toFixed(2)} · `+(mc?desc(mc):'out of range')
+    +(isPush()?' · push':!cur.yt&&Math.abs(rateCur-1)>0.002?` · playing at ${(rateCur*100).toFixed(1)}%`:'')+(lockMsg?' · '+lockMsg:''):'';
   $('fill').style.width=len?Math.min(100,el/len*100)+'%':'0';
   $('mkmin').style.left=len?Math.min(100,(base+st.min)/len*100)+'%':'0';
   const mb=$('mkb');if(cur&&boundary&&len){mb.style.display='block';mb.style.left=Math.min(100,boundary/len*100)+'%'}else mb.style.display='none';
@@ -631,9 +727,9 @@ async function setEn(id,v){const t=songs[id];t.energy=Math.min(1,Math.max(0,+v||
 $('go').onclick=()=>{
   if(timer){clearInterval(timer);timer=null;AU.forEach(a=>a.pause());cur=null;plan=null;disarm();$('go').textContent='▶ Start';return render()}
   AU.forEach(a=>{a.src=SILENT;a.play().catch(()=>{})});   // unlock playback inside the click
-  played=new Map();playSeq=0;cadHist=[];pushSong=null;$('go').textContent='⏹ Stop';log('— started —');loop();timer=setInterval(loop,1000);
+  played=new Map();playSeq=0;cadHist=[];pushState=null;songsSincePush=0;outSince=null;$('go').textContent='⏹ Stop';log('— started —');loop();timer=setInterval(loop,1000);
 };
-['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','push','pushmax'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
+['bpm','tol','min','mar','spread','xf','ew','htpen','conf','half','alt','wait','swap','rotate','hold','bl','stretch','lat','pxf'].forEach(id=>{$(id).oninput=render;$(id).onchange=render});
 setInterval(draw,100);
 fetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});
 </script></body></html>

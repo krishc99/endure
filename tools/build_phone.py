@@ -30,7 +30,12 @@ P = P[:a] + """<section class="card">
   <div class="row seg"><button id="src_manual" class="p">Manual</button><button id="src_motion">Phone motion</button><button id="src_ped">Step counter</button><button id="src_hc">Health Connect</button></div>
   <div class="row" style="margin-top:10px"><span class="big" id="bpmv">150</span><span class="small" id="cadsub">steps / BPM · manual</span></div>
   <input type="range" id="bpm" min="60" max="190" value="150">
-  <div id="livebox" style="display:none;margin-top:8px"><div class="small" id="livestatus">—</div></div>
+  <div id="livebox" style="display:none;margin-top:8px"><div class="small" style="display:flex;gap:8px;align-items:center"><span id="stepdot" style="width:12px;height:12px;border-radius:50%;background:var(--bd);flex:none;transition:background .08s"></span><span id="livestatus">—</span></div>
+    <div id="recbox" style="margin-top:8px;border-top:1px solid var(--bd);padding-top:8px">
+      <div class="small">Record a run to improve step detection: the raw motion and the steps the app counted, saved to a file you can share.</div>
+      <div class="row" style="justify-content:flex-start;margin-top:6px"><select id="carry"><option value="pocket">Phone in pocket</option><option value="hand">In hand, arm swinging</option><option value="held">Held steady (reading)</option><option value="armband">Armband / belt</option><option value="other">Other</option></select>
+        <button id="recbtn">● Record run</button><button id="recmark" style="display:none">Mark</button></div>
+      <div class="small" id="recstatus" style="margin-top:4px"></div></div></div>
   <div id="hcbox" style="display:none;margin-top:8px">
     <div class="row" style="justify-content:flex-start"><button id="hcconnect">Connect</button><button id="hctest">Test read</button></div>
     <div class="small" id="hcstatus" style="margin-top:6px">Not connected.</div>
@@ -59,7 +64,7 @@ rep('<label>Max wait for good exit (s)<input type="number" id="wait" value="20">
   <label>Step window (s)<input type="number" id="hcwin" value="120"></label>
   <label>Treat data as stopped after (s)<input type="number" id="hcstale" value="240"></label>
   <label>Health Connect poll (s)<input type="number" id="hcpoll" value="10"></label>
-  <label>Motion sensitivity (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
+  <label>Motion sensitivity: smallest step jolt (m/s²)<input type="number" id="mmin" value="0.5" step="0.1"></label>
   <label>Step counter window (s)<input type="number" id="pedwin" value="10"></label>
   <label>iTunes store country<input type="text" id="country" value="IN" maxlength="2"></label>
   <label>Spotify client ID<input type="text" id="spid" placeholder="for Spotify links"></label>
@@ -72,8 +77,8 @@ rep('<label>Max wait for good exit (s)<input type="number" id="wait" value="20">
 rep('<script>\nconst $=', '<script src="bridge.js"></script>\n<script>\nconst $=')
 # --- audio comes from blobs stored on the phone; cadence from the chosen source
 rep("n.src='/song/'+x.s.id;", "n.src=srcFor(x.s);", 2)
-rep("+$('bpm').value", "cadence()", 3)
-rep("$('bpmv').textContent=b;", "$('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':'steps / BPM · manual';")
+rep("const cadNow=()=>+$('bpm').value;", "const cadNow=()=>cadence();")
+rep("$('bpmv').textContent=b;", "$('bpmv').textContent=Math.round(b);$('cadsub').textContent=src==='hc'?'steps / min · Health Connect':src==='motion'?'steps / min · phone motion':src==='ped'?'steps / min · step counter':'steps / BPM · manual';")
 rep("const post=(p,o)=>fetch(p,{method:'POST',body:JSON.stringify(o)});", "")
 rep("setInterval(draw,100);\nfetch('/api/songs').then(r=>r.json()).then(d=>{songs=d;$('count').textContent=`${d.length} songs loaded`;render()});",
     "setInterval(draw,100);\n" + (HERE / "motion.js").read_text() + (HERE / "phone_extra.js").read_text() + "\ninitApp();")
@@ -85,7 +90,7 @@ rep(".set input[type=number]{width:100%}", ".set input[type=number],.set input[t
 # songs whose sources disagree (src 'check') show every source's vote under the title (votesLine is in phone_extra.js)
 rep("${m&&m.mode!=='1:1'?' · '+m.mode:''}</span></span>", "${m&&m.mode!=='1:1'?' · '+m.mode:''}</span>${votesLine(t)}</span>")
 # iOS can't fade YouTube's player: switch YouTube songs there with a cut (IOS comes from ytdeck.js)
-rep("  const xf=cur?S().xf:0,old=AU[ai];", "  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?S().xf:0,old=AU[ai];")
+rep("  const xf=cur?(fx!=null?fx:S().xf):0,old=AU[ai];", "  const xf=cur&&!(IOS&&(x.s.yt||cur.yt))?(fx!=null?fx:S().xf):0,old=AU[ai];")
 # Health Connect is Android-only
 rep("<button id=\"src_hc\">Health Connect</button>", "<button id=\"src_hc\" class=\"andonly\">Health Connect</button>")
 # --- YouTube Music songs: both decks can play an embedded YouTube player as well as local audio (see ytdeck.js)
@@ -97,7 +102,7 @@ rep('<div class="np" id="np">Press Start</div><div class="small" id="sub"></div>
     '<div class="np" id="np">Press Start</div><div class="small" id="sub"></div><div id="ytbox"></div>'
     '<div class="row" style="margin-top:8px;justify-content:flex-start"><button id="tap">Tap the beat</button>'
     '<span class="small" id="tapv">Wrong BPM? Tap along 8+ times, then save.</span><button id="tapsave" class="p" style="display:none">Save</button></div>')
-rep("function match(s,c){\n  const st=S();", "function match(s,c){\n  if(s.bad)return null;\n  const st=S();")
+rep("function match(s,c,tolO){\n  const st=S()", "function match(s,c,tolO){\n  if(s.bad)return null;\n  const st=S()")
 rep("$('fill').style.width=", "$('ytbox').style.display=cur&&cur.yt?'block':'none';\n  $('fill').style.width=")
 rep('<div class="row" style="justify-content:flex-start"><button id="imp">Import songs…</button>',
     """<label class="small" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">Play from

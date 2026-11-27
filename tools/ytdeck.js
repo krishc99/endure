@@ -90,6 +90,11 @@ class Deck{
     return this.p&&this._loaded===this.vid&&this.p.getDuration?(this.p.getDuration()||0):0;
   }
   get ended(){return this.mode==='yt'?this._ended:this.au.ended}
+  // speed: own songs only (beat lock). The YouTube player only offers coarse steps, so it stays at 1×.
+  get playbackRate(){return this.mode==='yt'?1:this.au.playbackRate}
+  set playbackRate(v){if(this.mode!=='yt'){this.au.preservesPitch=true;this.au.playbackRate=v}}
+  get defaultPlaybackRate(){return this.mode==='yt'?1:this.au.defaultPlaybackRate}
+  set defaultPlaybackRate(v){if(this.mode!=='yt')this.au.defaultPlaybackRate=v}
   get volume(){return this.mode==='yt'||this.gain?this._vol:this.au.volume}
   set volume(v){
     this._vol=v;

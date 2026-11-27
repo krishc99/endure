@@ -126,11 +126,31 @@ npm run open         # opens Android Studio; press Run with the phone connected
 1. **Import songs…** → select `library.json` and the audio files *together* in the picker. They are copied into the app, so you only do this once.
    For YouTube Music, import `yt_library.json` on its own (no audio files). **Play from** chooses all songs, YouTube only or local only.
 2. Pick where your cadence comes from:
-   - **Phone motion** (best for running): live from the accelerometer, reads a change in pace within a few seconds. Carry the phone in a pocket, armband or hand.
+   - **Phone motion** (best for running): counts each foot landing from the accelerometer (the dot flashes on every
+     step). Follows a change of pace within 3-4 steps and only reads 0 once you've actually stopped. Pocket, hand
+     (swinging or held steady to read) and armband all work. *Motion sensitivity* is the smallest jolt that counts as a step.
    - **Step counter**: the phone's hardware step counter (asks for the Physical activity permission).
    - **Manual**: drag the slider.
    - **Health Connect**: steps another app wrote; lags by minutes. Tap *Connect*, then *Test read*.
 4. Keep the screen on while running (the app does this itself while playing).
+
+### How songs follow you (own songs)
+- **Beat lock**: the song's tempo follows your cadence (up to ±6 %, *Follow your pace by up to*) and each step nudges it
+  so the beats land on your footfalls. Needs the song's beat data from `dj_live.py`; YouTube songs play at normal speed.
+  If the beat feels like it lands before or after your foot, change *Beat offset (ms)* (it covers the phone's audio delay).
+- **Pace change**: when your pace moves outside what the song can follow, the switch starts on the next beat and the
+  fade (*Pace-change fade*, 3 s) is done within about 4 s of the new pace being detected. Speeding up enters the new song
+  where the drums and instruments come in, not a stripped-down vocals-only part. Slowing down enters a calmer part.
+- **Steady pace**: a song plays through to the end of its last chorus, then the next one comes in at its first chorus.
+- **Push**: every third song at a steady pace is 3-5 BPM faster, at its own tempo. If you speed up to it, it stays.
+  If you don't, it switches back to your pace when its chorus ends. Then two songs at your pace, then the next push.
+- After updating, rescan once on the Mac (`dj_live.py` re-analyses every song for the new per-bar drum/instrument
+  measure) and re-import `library.json`. Older library files still work, with energy standing in for that measure.
+
+### Recording a run (to improve step detection)
+*Cadence → Phone motion → Record run*: pick how you carry the phone, run (include a speed-up, a slow-down and a short
+stop; tap *Mark* at each change), then *Stop & save* opens the share sheet. `node tools/replay_run.mjs FILE.json` replays
+it through the current detector. The step detector's tests (`npm test`) run on simulated motion (`test/gait_sim.mjs`).
 
 ## Important
 - Health Connect is a store, not a step counter. Something must write steps into it (Google Fit, Samsung Health, Fitbit, Garmin, …).
